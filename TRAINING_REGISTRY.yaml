@@ -24,16 +24,25 @@ runs:
     wandb_artifact: codec_v3-codec-best
     notes: Tier-A mask_arcsinh input; in progress on dr1_1k_scratch (May 2026)
 
+  - run_name: codec_v4_tier1_ddp
+    wandb_id: cu95nwot
+    wandb_url: https://wandb.ai/jjayaseelan-university-of-san-francisco/desi-fm-2026/runs/cu95nwot
+    phase: phase2-codec
+    state: running
+    manifest: dr1_1k_scratch.jsonl
+    steps: 20000
+    wandb_artifact: codec_v4_tier1_ddp-codec-best
+    checkpoint: deepsrch/checkpoints/codec_v4_tier1_ddp/best.pt
+    notes: >
+      Tier 1 v4 DDP (4 GPU): dual loss, healpix holdout, checkpoint on val/rms_flux,
+      mask_arcsinh_v4 + top-hat. Eval notebook downloads artifact codec_v4_tier1_ddp-codec-best.
+
   - run_name: codec_v4
     wandb_id: null
     phase: phase2-codec
-    state: planned
+    state: superseded
     manifest: dr1_1k_scratch.jsonl
-    wandb_artifact: codec_v4-codec-best
-    notes: >
-      Dual loss (arcsinh + physical flux), healpix holdout val, entropy penalty,
-      top-hat smoothing, commitment beta=0.05, checkpoint on val/rms_flux.
-      Train with scripts/train_codec.py --run-name codec_v4 (20k steps default).
+    notes: Use codec_v4_tier1_ddp for Tier 1 eval.
 
   - run_name: codec_v1
     wandb_id: efvc5599

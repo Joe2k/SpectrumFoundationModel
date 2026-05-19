@@ -21,6 +21,7 @@ def test_apply_version_defaults():
         checkpoint_metric="median",
         healpix_holdout_frac=0.0,
         val_every=0,
+        lr_schedule="constant",
     )
     tc.apply_version_defaults(args)
     assert args.steps == 20_000
@@ -29,3 +30,22 @@ def test_apply_version_defaults():
     assert args.checkpoint_metric == "val_rms"
     assert args.healpix_holdout_frac == 0.05
     assert args.val_every == 500
+    assert args.lr_schedule == "cosine"
+
+
+def test_learning_rate_scale_warmup_and_cosine():
+    base = 1e-4
+    warmup = 1000
+    total = 20_000
+    assert tc.learning_rate_scale(0, total_steps=total, base_lr=base, warmup_steps=warmup, schedule="cosine") < 0.01
+    assert abs(
+        tc.learning_rate_scale(999, total_steps=total, base_lr=base, warmup_steps=warmup, schedule="cosine") - 0.999
+    ) < 0.01
+    assert abs(
+        tc.learning_rate_scale(1000, total_steps=total, base_lr=base, warmup_steps=warmup, schedule="cosine") - 1.0
+    ) < 1e-6
+    end = tc.learning_rate_scale(
+        total - 1, total_steps=total, base_lr=base, warmup_steps=warmup, schedule="cosine", min_lr=1e-6
+    )
+    assert end < 0.02
+    assert tc.learning_rate_scale(5000, total_steps=total, base_lr=base, warmup_steps=0, schedule="constant") == 1.0

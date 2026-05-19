@@ -208,7 +208,7 @@ python scripts/train_codec.py \
 | VQ | Commitment **β=0.05**; **code-usage entropy** penalty (`λ_ent` default 0.1) |
 | Data split | `healpix_split` 5% val healpix (entire tiles) |
 | Checkpoint | Best on **val physical RMS** (not train arcsinh alone) |
-| Scale | Default **20k** steps, batch 32, lr 1e-4, warmup 1000 (NERSC) |
+| Scale | Default **20k** steps, batch 32, lr 1e-4, warmup 1000, cosine decay → min_lr 1e-6 (NERSC) |
 | Eval | `val_every` logging: `val/rms_flux`, `val/recon_arcsinh`, `val/std_ratio`, `val/q_loss` |
 
 ### Tier 2 (after Tier 1 gates)

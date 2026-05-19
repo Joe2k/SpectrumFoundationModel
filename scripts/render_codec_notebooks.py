@@ -175,22 +175,25 @@ def build_phase3() -> dict:
     cells: list[dict] = []
     cells.append(
         _md(
-            """# Phase 3 — Codec evaluation (W&B **codec_v2** vs **codec_v3**)
+            """# Phase 3 — Codec evaluation (v2 / v3 / **codec_v4 Tier 1**)
 
-Compare spectrum codecs trained with different **input normalization** (see `RESEARCH_LOG.md`):
+Compare spectrum codecs (see `RESEARCH_LOG.md` and `TRAINING_REGISTRY.yaml`):
 
-- **codec_v2**: median-based `denorm` (legacy; approximate restore in `normalize_spectrum_median_v2`).
-- **codec_v3**: mask-aware mean + log10 `denorm` + ivar clip (`mask_arcsinh_v3` in checkpoint).
+| Run | Eval path | Notes |
+|-----|-----------|--------|
+| **codec_v2** | `codec_v2_linear` | Legacy median linear scale |
+| **codec_v3** | `mask_arcsinh_v3` | Tier-A arcsinh + mask-aware denorm |
+| **codec_v4_tier1_ddp** | `mask_arcsinh_v4` | Tier 1: dual loss, top-hat, val `rms_flux` checkpoint |
 
 **Requirements**
 
-1. `pip install -e ".[dev]"` for `pyyaml` (matplotlib is a core dependency).
+1. `pip install -e ".[dev]"` for `pyyaml`.
 2. `WANDB_API_KEY` in repo `.env` or `wandb login`.
-3. W&B artifacts `codec_v2-codec-best:best` and `codec_v3-codec-best:best` (uploaded by `train_codec.py`). If `codec_v3` has not been pushed yet, place `best.pt` under `checkpoints/codec_v3/best.pt` manually.
+3. W&B artifacts `{run_name}-codec-best:best` or local `checkpoints/<run_name>/best.pt`.
 
-Downloads are cached under `checkpoints/wandb_cache/<run_name>/`.
+Checkpoints cache under `checkpoints/wandb_cache/<run_name>/`.
 
-**Local DR1 for eval:** the next section downloads **one** healpix tile (coadd + redrock, ~hundreds of MB) in the same survey/program order as NERSC ``dr1_1k_scratch.jsonl`` (first tile available on the [public portal](https://data.desi.lbl.gov/public/dr1/)). Re-run that cell to refresh FITS under `data/dr1_public/`."""
+**Local DR1:** next section downloads one healpix tile (training walk order on the [public portal](https://data.desi.lbl.gov/public/dr1/))."""
         )
     )
     cells.append(
@@ -256,13 +259,15 @@ def resolve_ckpt(run_name: str) -> Path:
     print(run_name, "downloaded to", path)
     return path
 
-# codec_v2 is expected to exist on W&B; codec_v3 may need local file or artifact
-ckpt_v2 = resolve_ckpt("codec_v2")
-try:
-    ckpt_v3 = resolve_ckpt("codec_v3")
-except Exception as exc:
-    print("codec_v3 unavailable:", exc)
-    ckpt_v3 = None"""
+# Runs to compare (edit list if you only want v4)
+EVAL_RUN_NAMES = ["codec_v2", "codec_v3", "codec_v4_tier1_ddp"]
+CHECKPOINTS: dict[str, Path] = {}
+for run_name in EVAL_RUN_NAMES:
+    try:
+        CHECKPOINTS[run_name] = resolve_ckpt(run_name)
+    except Exception as exc:
+        print(f"{run_name} unavailable:", exc)
+print("loaded:", list(CHECKPOINTS))"""
         )
     )
     cells.append(
@@ -291,31 +296,47 @@ for r in load_manifest(MANIFEST):
     )"""
         )
     )
-    cells.append(_md("## Training curves (W&B history)\n\n`train/recon` vs step when `wandb_id` is set in `TRAINING_REGISTRY.yaml` (codec_v3 often unset until you log a run id)."))
+    cells.append(
+        _md(
+            "## Training curves (W&B)\n\n"
+            "Left: `train/recon`. Right: `val/rms_flux` (Tier 1 v4 only; checkpoint metric)."
+        )
+    )
     cells.append(
         _code(
-            r"""plt.figure(figsize=(9, 4))
-key = "train/recon"
-for run_name, color in [("codec_v2", "steelblue"), ("codec_v3", "coral")]:
-    meta = runs.get(run_name) or {}
-    rid = meta.get("wandb_id")
+            r"""PLOT_RUNS = [
+    ("codec_v2", "steelblue"),
+    ("codec_v3", "coral"),
+    ("codec_v4_tier1_ddp", "mediumseagreen"),
+]
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+for run_name, color in PLOT_RUNS:
+    rid = (runs.get(run_name) or {}).get("wandb_id")
     if not rid:
-        print(f"skip history: no wandb_id for {run_name}")
+        print(f"skip curves: no wandb_id for {run_name}")
         continue
-    try:
-        df = wandb_run_history_df(str(rid), keys=["_step", key])
-    except Exception as exc:
-        print(run_name, "history failed:", exc)
-        continue
-    if key not in df.columns:
-        print(run_name, f"missing {key}")
-        continue
-    plt.plot(df["_step"], df[key], color=color, label=f"{run_name} ({rid})")
-plt.xlabel("step")
-plt.ylabel(key)
-plt.title("W&B training curves (if available)")
-plt.legend()
-plt.grid(True, alpha=0.3)
+    for ax, key in zip(axes, ["train/recon", "val/rms_flux"]):
+        try:
+            df = wandb_run_history_df(str(rid), keys=["_step", key])
+        except Exception as exc:
+            print(run_name, key, "failed:", exc)
+            continue
+        if key not in df.columns:
+            continue
+        sub = df.dropna(subset=[key])
+        if sub.empty:
+            continue
+        ax.plot(sub["_step"], sub[key], color=color, label=run_name, alpha=0.9)
+for ax, title, ylab in zip(
+    axes,
+    ["train/recon (arcsinh)", "val/rms_flux (held-out healpix)"],
+    ["train/recon", "val/rms_flux"],
+):
+    ax.set_xlabel("step")
+    ax.set_ylabel(ylab)
+    ax.set_title(title)
+    ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.3)
 plt.tight_layout()
 plt.show()"""
         )
@@ -323,10 +344,9 @@ plt.show()"""
     cells.append(
         _md(
             "## Load models + input styles\n\n"
-            "- **codec_v3** uses `mask_arcsinh_v3` (arcsinh + mask-aware denorm).\n"
-            "- **codec_v2** (`nv7py9b1`) was trained with **linear** `median(|flux|)` scaling — "
-            "not arcsinh. Eval uses `codec_v2_linear` (see `prepare_codec_v2_linear`).\n"
-            "- **Plots use one unpadded spectrum at a time**, not a padded batch row."
+            "- **codec_v2**: force `codec_v2_linear` (not in checkpoint metadata).\n"
+            "- **codec_v3 / v4**: `input_style` from `best.pt` (`mask_arcsinh_v3` / `mask_arcsinh_v4`).\n"
+            "- Per-spectrum plots use **unpadded** stitched coadds, not a single padded batch row."
         )
     )
     cells.append(
@@ -337,17 +357,23 @@ plt.show()"""
     load_spectrum_codec,
 )
 
+PLOT_STYLE = {
+    "codec_v2": ("codec_v2_linear", "darkorange", "codec_v2"),
+    "codec_v3": (None, "crimson", "codec_v3"),
+    "codec_v4_tier1_ddp": (None, "mediumseagreen", "codec_v4 tier1"),
+}
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("device:", device)
 
-model_v2, _ = load_spectrum_codec(ckpt_v2, device)
-
-if ckpt_v3 is None:
-    model_v3 = style_v3 = None
-    print("codec_v3 not loaded — comparison cells will skip v3.")
-else:
-    model_v3, style_v3 = load_spectrum_codec(ckpt_v3, device)
-    print("codec_v3 input_style:", style_v3)"""
+MODELS: dict[str, tuple] = {}
+for run_name, ckpt_path in CHECKPOINTS.items():
+    model, style_ckpt = load_spectrum_codec(ckpt_path, device)
+    style_override, color, label = PLOT_STYLE.get(run_name, (None, "gray", run_name))
+    style = style_override or style_ckpt
+    MODELS[run_name] = (model, style, color, label)
+    blob = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    print(f"{run_name}: style={style}  step={blob.get('step')}  loss={blob.get('loss')}")"""
         )
     )
     cells.append(
@@ -426,8 +452,7 @@ for k in batch:
     if isinstance(batch[k], torch.Tensor):
         batch[k] = batch[k].to(device)
 
-style_v2 = "codec_v2_linear"
-print("codec_v2 eval path:", style_v2, "(linear median scale — matches W&B codec_v2 training)")"""
+print("eval models:", {k: v[1] for k, v in MODELS.items()})"""
         )
     )
     cells.append(
@@ -440,15 +465,92 @@ print("codec_v2 eval path:", style_v2, "(linear median scale — matches W&B cod
     cells.append(
         _code(
             r"""rows = []
-r2 = forward_physical(model_v2, batch, style_v2)
-rows.append(("codec_v2", r2["recon_loss"], r2["q_loss"], r2["loss_total"]))
-if model_v3 is not None:
-    r3 = forward_physical(model_v3, batch, style_v3)
-    rows.append(("codec_v3", r3["recon_loss"], r3["q_loss"], r3["loss_total"]))
+for run_name, (model, style, _color, label) in MODELS.items():
+    out = forward_physical(model, batch, style)
+    rows.append((label, out["recon_loss"], out["q_loss"], out["loss_total"]))
 
-print(f"{'run':12s} {'recon':>10s} {'q_loss':>10s} {'total':>10s}")
+print(f"{'run':16s} {'recon':>10s} {'q_loss':>10s} {'total':>10s}")
 for name, a, b, c in rows:
-    print(f"{name:12s} {a:10.5f} {b:10.5f} {c:10.5f}")"""
+    print(f"{name:16s} {a:10.5f} {b:10.5f} {c:10.5f}")"""
+        )
+    )
+    cells.append(
+        _md(
+            "## Per-spectrum collapse check\n\n"
+            "Training logs `val/std_ratio` by pooling **all good pixels in the validation "
+            "minibatch** (std across the batch tensor). That can look healthier than this "
+            "table, which measures **within each spectrum** — the same view as the flux plots.\n\n"
+            "**Tier 1 gate:** `std_ratio` > 0.5 on good pixels (`RESEARCH_LOG.md`). "
+            "Values well below 0.5 mean a flat reconstruction (mode collapse)."
+        )
+    )
+    cells.append(
+        _code(
+            r"""from desifm.training.codec_loss import flux_std_ratio
+
+COLLAPSE_GATE = 0.5
+
+
+def rms_numpy(true_np, recon_np, mask_np):
+    g = ~np.asarray(mask_np, dtype=bool)
+    d = true_np[g].astype("float64") - recon_np[g].astype("float64")
+    return float(np.sqrt(np.mean(d * d)))
+
+
+def per_spec_std_ratio(model, style, spec: dict) -> tuple[float, float, float]:
+    # Within-spectrum std(recon)/std(coadd) on good pixels + RMS + arcsinh recon_loss.
+    fwd = forward_physical_from_spec(model, spec, style, device)
+    rec = fwd["flux_recon_native"]
+    flux_t = torch.from_numpy(np.asarray(spec["flux"], dtype=np.float32)).unsqueeze(0)
+    mask_t = torch.from_numpy(np.asarray(spec["mask"], dtype=bool)).unsqueeze(0)
+    ratio = float(flux_std_ratio(rec.unsqueeze(0), flux_t, mask_t).item())
+    rms = rms_numpy(spec["flux"], rec.numpy(), spec["mask"])
+    return ratio, rms, float(fwd["recon_loss"])
+
+
+model_labels = [(run_name, label) for run_name, (_, _, _, label) in MODELS.items()]
+hdr = f"{'idx':>3s} {'z':>7s} {'hp':>4s} {'row':>4s}"
+for _, label in model_labels:
+    short = label.replace("codec_", "").replace(" tier1", " t1")[:10]
+    hdr += f" {short + '_ratio':>11s}"
+print(hdr)
+print("-" * len(hdr))
+
+per_model_ratios: dict[str, list[float]] = {label: [] for _, label in model_labels}
+n_collapsed: dict[str, int] = {label: 0 for _, label in model_labels}
+
+for idx, spec in enumerate(raw_specs):
+    z = float(spec["z"])
+    hp = spec.get("healpix", "?")
+    row = spec.get("row", "?")
+    line = f"{idx:3d} {z:7.4f} {str(hp):>4s} {str(row):>4s}"
+    for run_name, label in model_labels:
+        model, style, _, _ = MODELS[run_name]
+        ratio, _rms, _loss = per_spec_std_ratio(model, style, spec)
+        per_model_ratios[label].append(ratio)
+        if ratio < COLLAPSE_GATE:
+            n_collapsed[label] += 1
+        flag = "!" if ratio < COLLAPSE_GATE else " "
+        line += f" {ratio:10.3f}{flag}"
+    print(line)
+
+print()
+print(f"Gate: std_ratio > {COLLAPSE_GATE}  (! = collapsed)")
+for _, label in model_labels:
+    vals = np.asarray(per_model_ratios[label], dtype=np.float64)
+    print(
+        f"  {label:16s}  mean={vals.mean():.3f}  median={np.median(vals):.3f}  "
+        f"min={vals.min():.3f}  collapsed={n_collapsed[label]}/{len(vals)}"
+    )
+
+print("\nBatch-pooled std_ratio (same aggregation as W&B val/std_ratio on this minibatch):")
+for run_name, (model, style, _c, label) in MODELS.items():
+    out = forward_physical(model, batch, style)
+    pooled = float(
+        flux_std_ratio(out["flux_recon"], out["flux_true"], batch["mask"].to(device)).item()
+    )
+    flag = "  <- can exceed per-spec median when spectra differ in level" if pooled > COLLAPSE_GATE else ""
+    print(f"  {label:16s}  pooled={pooled:.3f}{flag}")"""
         )
     )
     cells.append(
@@ -457,14 +559,15 @@ for name, a, b, c in rows:
             "| Trace | Meaning |\n"
             "|-------|--------|\n"
             "| **stitched coadd** | Real DESI flux from FITS |\n"
-            "| **codec_v2 / v3 recon** | Model output in physical units |\n\n"
-            "Bottom panel: **normalized flux** (v2: linear / median scale; v3: arcsinh target on 8704 grid)."
+            "| **codec recon traces** | Model output in physical units |\n\n"
+            "Bottom panel: internal units (v2 linear scale; v3/v4 arcsinh on 8704 grid)."
         )
     )
     cells.append(
         _code(
             r"""from desifm.constants import GRID_SIZE
-from desifm.training.codec_input import prepare_codec_batch_for_style, prepare_codec_v2_linear
+from desifm.training.codec_input import prepare_codec_batch_for_style
+from desifm.training.codec_loss import flux_std_ratio
 
 
 def _ylim_overlay(flux_np, *extra, good, k_std=5.0):
@@ -488,8 +591,14 @@ def plot_compare(idx: int = 0):
     z = float(sp["z"])
     good = ~np.asarray(mask, dtype=bool)
 
-    r2 = forward_physical_from_spec(model_v2, sp, style_v2, device)
-    rec2 = r2["flux_recon_native"].numpy()
+    forwards: dict[str, dict] = {}
+    recons = []
+    roundtrips = []
+    for run_name, (model, style, color, label) in MODELS.items():
+        fwd = forward_physical_from_spec(model, sp, style, device)
+        forwards[run_name] = fwd
+        rec = fwd["flux_recon_native"].numpy()
+        recons.append(rec)
 
     fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True, gridspec_kw={"height_ratios": [2, 1]})
     ax = axes[0]
@@ -504,87 +613,65 @@ def plot_compare(idx: int = 0):
         flux_label="stitched coadd (FITS)",
         adaptive_ylim=False,
     )
-    ax.plot(wave[good], rec2[good], "--", color="darkorange", lw=1.4, zorder=10, label="codec_v2 recon")
-    rec3 = rt3 = None
-    if model_v3 is not None:
-        r3 = forward_physical_from_spec(model_v3, sp, style_v3, device)
-        rec3 = r3["flux_recon_native"].numpy()
-        rt3 = r3["flux_roundtrip_native"].numpy()
-        ax.plot(wave[good], rt3[good], ":", color="silver", lw=1.0, zorder=9, label="v3 input roundtrip")
-        ax.plot(wave[good], rec3[good], "--", color="crimson", lw=1.4, zorder=10, label="codec_v3 recon")
-    ylim = _ylim_overlay(flux, rec2, rec3, rt3, good=good)
+    for run_name, (model, style, color, label) in MODELS.items():
+        fwd = forwards[run_name]
+        rec = fwd["flux_recon_native"].numpy()
+        ax.plot(wave[good], rec[good], "--", color=color, lw=1.4, zorder=10, label=f"{label} recon")
+        if style != "codec_v2_linear":
+            rt = fwd["flux_roundtrip_native"].numpy()
+            roundtrips.append(rt)
+            if run_name == "codec_v4_tier1_ddp":
+                ax.plot(
+                    wave[good],
+                    rt[good],
+                    ":",
+                    color="silver",
+                    lw=1.0,
+                    zorder=9,
+                    label="v4 input roundtrip",
+                )
+    ylim = _ylim_overlay(flux, *recons, *roundtrips, good=good)
     if ylim is not None:
         ax.set_ylim(ylim)
-    med = float(np.nanmedian(np.abs(flux[np.isfinite(flux)])))
-    if np.isfinite(med) and 0 < med < 1e-2:
-        ax.ticklabel_format(axis="y", style="sci", scilimits=(0, 0), useMathText=True)
     ax.set_title(f"spectrum {idx}  z={z:.4f}  healpix={sp.get('healpix', '?')} row={sp.get('row', '?')}")
     ax.legend(loc="upper right", fontsize=7)
 
     ax2 = axes[1]
     g = np.linspace(wave.min(), wave.max(), GRID_SIZE)
-    # v2 target/recon live on the codec grid (8704), not native pixel count
-    tgt2 = r2["target_norm"][0].numpy()
-    rec2n = r2["recon_norm"][0].numpy()
-    ax2.plot(g, tgt2, "k-", lw=0.5, alpha=0.7, label="v2 target (flux/scale)")
-    ax2.plot(g, rec2n, "--", color="darkorange", lw=0.8, label="v2 recon (flux/scale)")
-    if model_v3 is not None:
-        x3, den3, _ = prepare_codec_batch_for_style(
-            {
+    for run_name, (model, style, color, label) in MODELS.items():
+        fwd = forwards[run_name]
+        if style == "codec_v2_linear":
+            ax2.plot(g, fwd["target_norm"][0].numpy(), "k-", lw=0.5, alpha=0.5)
+            ax2.plot(g, fwd["recon_norm"][0].numpy(), "--", color=color, lw=0.8, label=f"{label} (flux/scale)")
+        else:
+            batch1 = {
                 "flux": torch.from_numpy(flux).float().unsqueeze(0),
                 "ivar": torch.from_numpy(np.asarray(sp["ivar"], dtype=np.float32)).unsqueeze(0),
                 "mask": torch.from_numpy(np.asarray(mask, dtype=bool)).unsqueeze(0),
-            },
-            style_v3,
-        )
-        x3g = torch.nn.functional.interpolate(x3, size=GRID_SIZE, mode="linear", align_corners=False)
-        with torch.no_grad():
-            out3 = model_v3(x3g.to(device), den3.to(device))
-        ax2.plot(g, x3g[0, 0].cpu().numpy(), ":", color="gray", lw=0.5, alpha=0.6, label="v3 target (arcsinh)")
-        ax2.plot(g, out3["recon"][0, 0].cpu().numpy(), "--", color="crimson", lw=0.8, label="v3 recon (arcsinh)")
+            }
+            x, den, _ = prepare_codec_batch_for_style(batch1, style)
+            xg = torch.nn.functional.interpolate(x, size=GRID_SIZE, mode="linear", align_corners=False)
+            with torch.no_grad():
+                out = model(xg.to(device), den.to(device))
+            ax2.plot(g, xg[0, 0].cpu().numpy(), ":", color=color, lw=0.4, alpha=0.5)
+            ax2.plot(g, out["recon"][0, 0].cpu().numpy(), "--", color=color, lw=0.8, label=f"{label} (arcsinh)")
     ax2.set_ylabel("codec internal units")
     ax2.set_xlabel("wavelength (Å)")
     ax2.legend(loc="upper right", fontsize=7)
     ax2.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.show()
-    print(
-        f"coadd median={np.median(flux[good]):.3e}  v2 recon={np.median(rec2[good]):.3e}  "
-        f"v2 recon_loss={r2['recon_loss']:.4f}"
-    )
-    if rec3 is not None:
-        print(
-            f"v3 roundtrip={np.median(rt3[good]):.3e}  v3 recon={np.median(rec3[good]):.3e}  "
-            f"(v3 denorm={float(r3['denorm'][0]):.3e})"
-        )
+
+    flux_t = torch.from_numpy(flux).float().unsqueeze(0)
+    mask_t = torch.from_numpy(np.asarray(mask, dtype=bool)).unsqueeze(0)
+    for run_name, (model, style, color, label) in MODELS.items():
+        rec = forwards[run_name]["flux_recon_native"].numpy()
+        ratio = float(flux_std_ratio(torch.from_numpy(rec).unsqueeze(0), flux_t, mask_t).item())
+        rms = rms_numpy(flux, rec, mask)
+        print(f"{label:16s}  RMS={rms:.4f}  std_ratio={ratio:.3f}  recon_loss={forwards[run_name]['recon_loss']:.4f}")
 
 
-plot_compare(0)"""
-        )
-    )
-    cells.append(
-        _md(
-            """## Residual RMS on good pixels (first item)
-
-Quick scalar per spectrum; not a full test set."""
-        )
-    )
-    cells.append(
-        _code(
-            r"""def rms_numpy(true_np, recon_np, mask_np):
-    g = ~np.asarray(mask_np, dtype=bool)
-    d = true_np[g].astype("float64") - recon_np[g].astype("float64")
-    return float(np.sqrt(np.mean(d * d)))
-
-
-sp0 = raw_specs[0]
-r2 = forward_physical_from_spec(model_v2, sp0, style_v2, device)
-print("codec_v2 RMS vs coadd:", rms_numpy(sp0["flux"], r2["flux_recon_native"].numpy(), sp0["mask"]))
-print("codec_v2 RMS vs roundtrip:", rms_numpy(r2["flux_roundtrip_native"].numpy(), r2["flux_recon_native"].numpy(), sp0["mask"]))
-if model_v3 is not None:
-    r3 = forward_physical_from_spec(model_v3, sp0, style_v3, device)
-    print("codec_v3 RMS vs coadd:", rms_numpy(sp0["flux"], r3["flux_recon_native"].numpy(), sp0["mask"]))
-    print("codec_v3 RMS vs roundtrip:", rms_numpy(r3["flux_roundtrip_native"].numpy(), r3["flux_recon_native"].numpy(), sp0["mask"]))"""
+plot_compare(0)  # change index to inspect other rows from the table above"""
         )
     )
     return _nb(cells)

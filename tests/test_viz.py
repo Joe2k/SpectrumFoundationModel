@@ -1,5 +1,7 @@
 """Tests for spectrum visualization helpers."""
 
+import warnings
+
 import matplotlib
 
 matplotlib.use("Agg")
@@ -7,7 +9,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from desifm.viz.spectrum_plot import REST_LINES, _adaptive_ylim, observed_lines, plot_spectrum_with_lines
+from desifm.viz.spectrum_plot import (
+    REST_LINES,
+    _adaptive_ylim,
+    _capped_sigma_plot,
+    observed_lines,
+    plot_spectrum_with_lines,
+)
 
 
 def test_observed_lines_redshift():
@@ -34,6 +42,17 @@ def test_adaptive_ylim_uses_good_pixels_only():
     med, std = float(np.median(fg)), float(np.std(fg))
     assert lo <= med <= hi
     assert hi - lo <= 20.0 * std + 1e-18
+
+
+def test_capped_sigma_plot_zero_ivar_no_runtime_warning():
+    flux = np.array([1e-17, 2e-17, 3e-17])
+    ivar = np.array([1e32, 0.0, np.nan])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        sigma = _capped_sigma_plot(flux, ivar)
+    assert np.isfinite(sigma[0])
+    assert np.isnan(sigma[1])
+    assert np.isnan(sigma[2])
 
 
 def test_plot_spectrum_with_lines_sets_reasonable_ylim():

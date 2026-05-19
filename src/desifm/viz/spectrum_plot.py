@@ -73,7 +73,13 @@ def observed_lines(z: float, lines: Iterable[tuple[float, str, str]] = REST_LINE
 
 def _capped_sigma_plot(flux: np.ndarray, ivar: np.ndarray) -> np.ndarray:
     """Formal 1/√ivar with a per-spectrum cap so a few tiny-ivar pixels do not dominate the plot."""
-    sigma = np.where(ivar > 0, 1.0 / np.sqrt(ivar), np.nan)
+    # np.where evaluates both branches; use masked divide to avoid ivar==0 warnings.
+    sigma = np.divide(
+        1.0,
+        np.sqrt(ivar),
+        out=np.full(np.shape(ivar), np.nan, dtype=np.float64),
+        where=ivar > 0,
+    )
     good_f = np.isfinite(flux)
     if good_f.any():
         spread = float(np.nanpercentile(flux[good_f], 99) - np.nanpercentile(flux[good_f], 1))

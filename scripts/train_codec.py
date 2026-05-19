@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import sys
 import time
 from pathlib import Path
@@ -121,6 +122,30 @@ def run_validation(
     return {k: v / n for k, v in totals.items()}
 
 
+def learning_rate_scale(
+    step: int,
+    *,
+    total_steps: int,
+    base_lr: float,
+    warmup_steps: int = 0,
+    schedule: str = "constant",
+    min_lr: float = 1e-6,
+) -> float:
+    """Multiplier for base LR at ``step`` (0-based): linear warmup, then constant or cosine decay."""
+    if warmup_steps > 0 and step < warmup_steps:
+        return max(step / warmup_steps, 1e-8)
+    if schedule == "constant":
+        return 1.0
+    if schedule != "cosine":
+        raise ValueError(f"Unknown lr schedule: {schedule!r}")
+
+    decay_steps = max(total_steps - warmup_steps, 1)
+    progress = min(max((step - warmup_steps) / decay_steps, 0.0), 1.0)
+    min_ratio = min(min_lr / max(base_lr, 1e-12), 1.0)
+    cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+    return min_ratio + (1.0 - min_ratio) * cosine
+
+
 def infer_codec_version(run_name: str, explicit: str | None) -> str:
     if explicit:
         return explicit
@@ -144,6 +169,8 @@ def apply_version_defaults(args: argparse.Namespace) -> None:
         args.healpix_holdout_frac = 0.05
     if args.val_every == 0:
         args.val_every = 500
+    if args.lr_schedule == "constant":
+        args.lr_schedule = "cosine"
 
 
 def main():
@@ -156,6 +183,18 @@ def main():
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--warmup-steps", type=int, default=0, help="Linear LR warmup (v4 default 1000)")
+    p.add_argument(
+        "--lr-schedule",
+        choices=["constant", "cosine"],
+        default="constant",
+        help="After warmup: flat LR or cosine decay to --min-lr (v4 default: cosine)",
+    )
+    p.add_argument(
+        "--min-lr",
+        type=float,
+        default=1e-6,
+        help="Floor LR for cosine schedule (absolute, not a ratio)",
+    )
     p.add_argument("--max-spectra", type=int, default=None)
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--max-loss", type=float, default=50.0, help="Skip steps with loss above this")
@@ -258,11 +297,15 @@ def main():
         log.info("run_dir=%s", run_dir)
         log.info("manifest=%s", manifest_path or "(synthetic)")
         log.info(
-            "dataset_size=%d batch_size=%d steps=%d lr=%g λ_phys=%g λ_ent=%g commit=%g",
+            "dataset_size=%d batch_size=%d steps=%d lr=%g schedule=%s min_lr=%g warmup=%d "
+            "λ_phys=%g λ_ent=%g commit=%g",
             len(ds),
             args.batch_size,
             args.steps,
             args.lr,
+            args.lr_schedule,
+            args.min_lr,
+            args.warmup_steps,
             args.lambda_phys,
             args.lambda_entropy,
             commitment,
@@ -294,9 +337,14 @@ def main():
     it = iter(loader)
 
     def lr_scale(s: int) -> float:
-        if args.warmup_steps <= 0 or s >= args.warmup_steps:
-            return 1.0
-        return max(s / args.warmup_steps, 1e-8)
+        return learning_rate_scale(
+            s,
+            total_steps=args.steps,
+            base_lr=args.lr,
+            warmup_steps=args.warmup_steps,
+            schedule=args.lr_schedule,
+            min_lr=args.min_lr,
+        )
 
     def checkpoint_score() -> float:
         assert tracker is not None

@@ -53,7 +53,7 @@ python scripts/train_codec.py \
   --wandb-mode online
 ```
 
-Defaults with `--run-name codec_v4`: 20k steps, batch 32, lr 1e-4, warmup 1k, `λ_phys=0.5`, `λ_ent=0.1`, val every 500 steps.
+Defaults with `--run-name codec_v4`: 20k steps, batch 32, lr 1e-4, warmup 1k, **cosine decay to min_lr 1e-6**, `λ_phys=0.5`, `λ_ent=0.1`, val every 500 steps. Disable decay with `--lr-schedule constant`.
 
 ### codec_v4 DDP (4 GPUs, recommended for 20k steps)
 
