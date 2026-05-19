@@ -21,7 +21,9 @@
 #   RUN_NAME=codec_v4_tier1_ddp STEPS=20000 BATCH_SIZE=32 sbatch scripts/train_codec_ddp.slurm
 
 set -euo pipefail
-cd "${SLURM_SUBMIT_DIR:-$(pwd)}"
+# Submit from repo root: cd $HOME/SpectrumFoundationModel && sbatch scripts/train_codec_ddp.slurm
+REPO="${REPO:-${SLURM_SUBMIT_DIR:-$HOME/SpectrumFoundationModel}}"
+cd "$REPO"
 module load "${PYTORCH_MODULE:-pytorch/2.8.0}"
 
 export NERSC_SCRATCH_ROOT="${NERSC_SCRATCH_ROOT:-$SCRATCH/deepsrch}"

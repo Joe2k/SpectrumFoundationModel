@@ -68,6 +68,8 @@ Or interactively:
 
 ```bash
 salloc -A deepsrch_g -C gpu -q interactive -t 04:00:00 --nodes=1 --gpus=4 --cpus-per-task=128
+cd $HOME/SpectrumFoundationModel   # repo root — required before torchrun/sbatch
+git pull
 module load pytorch/2.8.0
 pip install -e .
 export NERSC_SCRATCH_ROOT=$SCRATCH/deepsrch
