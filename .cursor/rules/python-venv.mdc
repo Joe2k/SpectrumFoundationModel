@@ -1,0 +1,11 @@
+---
+description: Use the repo .venv for Python, pip, pytest, and scripts (not global python).
+alwaysApply: true
+---
+
+# Python environment (this repo)
+
+- Treat **`./.venv/bin/python`** as the only supported interpreter for local development, tests, and scripts in this repository.
+- When running shell commands here, prefer `.venv/bin/python`, `.venv/bin/pip`, and `.venv/bin/pytest` (or `source .venv/bin/activate` first).
+- Do not suggest `pip install` to the user’s global/system Python for this project.
+- NERSC / cluster instructions may use their own modules; this rule applies to **local** machine workflows unless the user explicitly says otherwise.

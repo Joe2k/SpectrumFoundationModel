@@ -12,21 +12,40 @@ This codebase was rewritten cleanly for the final project. It is **not** a copy 
 - **Approach A**: encoder sees `z`; auxiliary MLP on pooled encoder for joint redshift learning
 - **Approach B**: encoder is spectrum-only; decoder always uses `REDMASK` at the redshift slot
 
-## Install
+## Install (local: venv only)
+
+Use a **repo-local** virtualenv. Do not `pip install` this project into your system Python; that environment is shared with other tools and cannot be cleaned up “for this repo only” without manual `pip uninstall` decisions on your side.
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-pytest
+bash scripts/bootstrap_venv.sh
 ```
+
+Then use `.venv/bin/python` (or `source .venv/bin/activate`). Shortcuts:
+
+```bash
+make bootstrap   # same as the script above
+make test        # pytest inside .venv
+make smoke       # local training smoke (requires .venv)
+make download    # DR1 sample download script
+```
+
+In VS Code / Cursor, use the interpreter **`./.venv/bin/python`** (`.vscode/settings.json` points there).
 
 ## Local smoke (no FITS)
 
 ```bash
-bash scripts/run_smoke_local.sh
+make smoke
 ```
 
 Uses `--synthetic` random spectra; checkpoints land in `checkpoints/smoke_local/`.
+
+## Local DR1 sample (real FITS, laptop)
+
+`notebooks/01_phase_data.ipynb` downloads **one** iron healpix tile by default (two FITS: coadd + redrock) from the [DESI public portal](https://data.desi.lbl.gov/public/) into `data/dr1_public/` (gitignored) and builds `data/manifests/local_dr1.jsonl`. That notebook is **local-only** (no NERSC paths). Increase `N_HEALPIX` in the notebook (or pass `--max-tiles`) to pull more tiles from the built-in catalog.
+
+```bash
+make download
+```
 
 ## NERSC (interactive, SCRATCH-only)
 
@@ -40,7 +59,9 @@ See [docs/NERSC_INTERACTIVE.md](docs/NERSC_INTERACTIVE.md).
 
 ```
 src/desifm/          # library code (all original)
-scripts/             # CLI entry points
+scripts/             # CLI entry points (bootstrap_venv.sh, run_smoke_local.sh, …)
 tests/               # tests written for this package
-notebooks/           # phase notebooks (fill during runs)
+notebooks/           # phase notebooks (use ../.venv/bin/python kernel)
+Makefile             # venv-scoped shortcuts (make test, smoke, download)
+.cursor/rules/       # agent conventions (venv-only Python)
 ```

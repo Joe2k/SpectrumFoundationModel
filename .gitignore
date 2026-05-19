@@ -8,3 +8,7 @@ checkpoints/
 desifm.egg-info/
 logs/*.jsonl
 wandb/
+
+# Local DESI DR1 downloads (public portal; see notebooks/01_phase_data.ipynb)
+data/dr1_public/
+data/manifests/local_dr1.jsonl

@@ -1,5 +1,7 @@
 # NERSC interactive workflow (SCRATCH only)
 
+On your **laptop**, use the repo virtualenv (`bash scripts/bootstrap_venv.sh`); this page is for **Perlmutter / NERSC** only.
+
 ```bash
 export NERSC_SCRATCH_ROOT=$SCRATCH/deepsrch
 mkdir -p $NERSC_SCRATCH_ROOT/{manifests,dr1_staged,checkpoints,wandb,logs}
