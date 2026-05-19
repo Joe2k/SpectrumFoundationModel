@@ -30,7 +30,7 @@ export NERSC_SCRATCH_ROOT="${NERSC_SCRATCH_ROOT:-$SCRATCH/deepsrch}"
 export WANDB_DIR="${WANDB_DIR:-$NERSC_SCRATCH_ROOT/wandb}"
 export WANDB_PROJECT="${WANDB_PROJECT:-desi-fm-2026}"
 
-RUN_NAME="${RUN_NAME:-codec_v4_tier1_ddp}"
+RUN_NAME="${RUN_NAME:-codec_v4_tier1_cosine_ramp}"
 MANIFEST="${MANIFEST:-$NERSC_SCRATCH_ROOT/manifests/dr1_1k_scratch.jsonl}"
 STEPS="${STEPS:-20000}"
 BATCH_SIZE="${BATCH_SIZE:-32}"

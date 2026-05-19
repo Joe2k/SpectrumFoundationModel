@@ -27,7 +27,7 @@ from desifm.training.codec_input import (
     prepare_codec_batch_for_style,
     prepare_codec_batch_v4,
 )
-from desifm.training.codec_loss import flux_rms, flux_std_ratio
+from desifm.training.codec_loss import flux_rms, flux_std_ratio, flux_std_ratio_per_sample
 from desifm.training.distributed import (
     all_ranks_agree_skip,
     cleanup_distributed,
@@ -90,7 +90,9 @@ def run_validation(
         "entropy": 0.0,
         "rms": 0.0,
         "std_ratio": 0.0,
+        "std_ratio_per_spec_median": 0.0,
     }
+    per_spec_ratios: list[float] = []
     for batch in loader:
         if batch is None:
             continue
@@ -113,13 +115,21 @@ def run_validation(
         totals["std_ratio"] += float(
             flux_std_ratio(out["recon_phys"], out["target_phys"], mask_g).item()
         )
+        per_spec_ratios.extend(
+            flux_std_ratio_per_sample(out["recon_phys"], out["target_phys"], mask_g).tolist()
+        )
         n += 1
         if n >= max_batches:
             break
     model.train()
     if n == 0:
         return {k: float("inf") for k in totals}
-    return {k: v / n for k, v in totals.items()}
+    out_stats = {k: v / n for k, v in totals.items()}
+    if per_spec_ratios:
+        out_stats["std_ratio_per_spec_median"] = float(torch.tensor(per_spec_ratios).median().item())
+    else:
+        out_stats["std_ratio_per_spec_median"] = 0.0
+    return out_stats
 
 
 def learning_rate_scale(
@@ -144,6 +154,13 @@ def learning_rate_scale(
     min_ratio = min(min_lr / max(base_lr, 1e-12), 1.0)
     cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
     return min_ratio + (1.0 - min_ratio) * cosine
+
+
+def lambda_ramp_scale(step: int, ramp_steps: int) -> float:
+    """Linear 0→1 multiplier for λ_phys / optional λ_ent over the first ``ramp_steps``."""
+    if ramp_steps <= 0:
+        return 1.0
+    return min(max(step / ramp_steps, 0.0), 1.0)
 
 
 def infer_codec_version(run_name: str, explicit: str | None) -> str:
@@ -171,6 +188,8 @@ def apply_version_defaults(args: argparse.Namespace) -> None:
         args.val_every = 500
     if args.lr_schedule == "constant":
         args.lr_schedule = "cosine"
+    if args.lambda_phys_ramp_steps == 0:
+        args.lambda_phys_ramp_steps = 4000
 
 
 def main():
@@ -209,6 +228,12 @@ def main():
     p.add_argument("--val-every", type=int, default=0, help="Run val every N steps (0=disabled)")
     p.add_argument("--val-max-batches", type=int, default=32)
     p.add_argument("--lambda-phys", type=float, default=0.0)
+    p.add_argument(
+        "--lambda-phys-ramp-steps",
+        type=int,
+        default=0,
+        help="Linearly ramp λ_phys from 0 to target over N steps (v4 default 4000)",
+    )
     p.add_argument("--lambda-entropy", type=float, default=0.0)
     p.add_argument("--commitment-weight", type=float, default=None, help="LFQ beta (v4 default 0.05)")
     p.add_argument("--wandb-mode", default="online", choices=["online", "offline", "disabled"])
@@ -298,7 +323,7 @@ def main():
         log.info("manifest=%s", manifest_path or "(synthetic)")
         log.info(
             "dataset_size=%d batch_size=%d steps=%d lr=%g schedule=%s min_lr=%g warmup=%d "
-            "λ_phys=%g λ_ent=%g commit=%g",
+            "λ_phys=%g ramp=%d λ_ent=%g commit=%g",
             len(ds),
             args.batch_size,
             args.steps,
@@ -307,6 +332,7 @@ def main():
             args.min_lr,
             args.warmup_steps,
             args.lambda_phys,
+            args.lambda_phys_ramp_steps,
             args.lambda_entropy,
             commitment,
         )
@@ -389,11 +415,13 @@ def main():
 
         batch_d = {k: v.to(device) if torch.is_tensor(v) else v for k, v in batch.items()}
         x, denorm, mask = prepare_batch(batch_d, input_style)
+        ramp = lambda_ramp_scale(step, args.lambda_phys_ramp_steps)
+        lambda_phys_eff = args.lambda_phys * ramp
         out = unwrap(model)(
             x,
             denorm,
             mask,
-            lambda_phys=args.lambda_phys,
+            lambda_phys=lambda_phys_eff,
             lambda_entropy=args.lambda_entropy,
         )
         loss = out["loss"]
@@ -436,6 +464,8 @@ def main():
                     "skipped": skipped,
                     "steps_per_sec": sps,
                     "lr": opt.param_groups[0]["lr"],
+                    "lambda_phys_eff": lambda_phys_eff,
+                    "lambda_ramp": ramp,
                 }
                 if tracker:
                     rec["loss_avg"] = avg_f
@@ -461,6 +491,8 @@ def main():
                     "train/entropy": rec["entropy_loss"],
                     "train/skipped": skipped,
                     "train/lr": opt.param_groups[0]["lr"],
+                    "train/lambda_phys_eff": lambda_phys_eff,
+                    "train/lambda_ramp": ramp,
                 }
                 if tracker:
                     wb_payload["train/loss_avg"] = avg_f
@@ -489,11 +521,12 @@ def main():
                 )
                 append_metrics(metrics_path, {"kind": "val", "step": step, **val_stats})
                 log.info(
-                    "val step=%d rms=%.4f recon=%.4f std_ratio=%.3f q=%.4f ent=%.4f",
+                    "val step=%d rms=%.4f recon=%.4f std_ratio=%.3f std_med=%.3f q=%.4f ent=%.4f",
                     step,
                     val_stats["rms"],
                     val_stats["recon"],
                     val_stats["std_ratio"],
+                    val_stats["std_ratio_per_spec_median"],
                     val_stats["q"],
                     val_stats["entropy"],
                 )
@@ -505,6 +538,7 @@ def main():
                         "val/phys": val_stats["phys"],
                         "val/rms_flux": val_stats["rms"],
                         "val/std_ratio": val_stats["std_ratio"],
+                        "val/std_ratio_per_spec_median": val_stats["std_ratio_per_spec_median"],
                         "val/q_loss": val_stats["q"],
                         "val/entropy_penalty": val_stats["entropy"],
                     },

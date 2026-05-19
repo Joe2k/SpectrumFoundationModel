@@ -113,3 +113,17 @@ def flux_std_ratio(
     pred_s = _std(pred_flux)
     tgt_s = _std(target_flux)
     return pred_s / tgt_s.clamp(min=1e-8)
+
+
+def flux_std_ratio_per_sample(
+    pred_flux: torch.Tensor,
+    target_flux: torch.Tensor,
+    mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Per-row std(pred)/std(target) on good pixels; shape (B,)."""
+    pred_flux, target_flux, mask = _align_flux_metrics_inputs(pred_flux, target_flux, mask)
+    ratios = [
+        flux_std_ratio(pred_flux[b : b + 1], target_flux[b : b + 1], None if mask is None else mask[b : b + 1])
+        for b in range(pred_flux.shape[0])
+    ]
+    return torch.stack(ratios).reshape(-1)

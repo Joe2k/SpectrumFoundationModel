@@ -22,6 +22,7 @@ def test_apply_version_defaults():
         healpix_holdout_frac=0.0,
         val_every=0,
         lr_schedule="constant",
+        lambda_phys_ramp_steps=0,
     )
     tc.apply_version_defaults(args)
     assert args.steps == 20_000
@@ -31,6 +32,15 @@ def test_apply_version_defaults():
     assert args.healpix_holdout_frac == 0.05
     assert args.val_every == 500
     assert args.lr_schedule == "cosine"
+    assert args.lambda_phys_ramp_steps == 4000
+
+
+def test_lambda_ramp_scale():
+    assert tc.lambda_ramp_scale(0, 4000) == 0.0
+    assert abs(tc.lambda_ramp_scale(2000, 4000) - 0.5) < 1e-6
+    assert tc.lambda_ramp_scale(4000, 4000) == 1.0
+    assert tc.lambda_ramp_scale(9000, 4000) == 1.0
+    assert tc.lambda_ramp_scale(100, 0) == 1.0
 
 
 def test_learning_rate_scale_warmup_and_cosine():

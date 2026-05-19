@@ -209,7 +209,8 @@ python scripts/train_codec.py \
 | Data split | `healpix_split` 5% val healpix (entire tiles) |
 | Checkpoint | Best on **val physical RMS** (not train arcsinh alone) |
 | Scale | Default **20k** steps, batch 32, lr 1e-4, warmup 1000, cosine decay → min_lr 1e-6 (NERSC) |
-| Eval | `val_every` logging: `val/rms_flux`, `val/recon_arcsinh`, `val/std_ratio`, `val/q_loss` |
+| λ_phys | Target 0.5, **linear ramp over 4000 steps** (arcsinh-first, then physical) |
+| Eval | `val/rms_flux`, `val/recon_arcsinh`, `val/std_ratio` (pooled), **`val/std_ratio_per_spec_median`**, `val/q_loss` |
 
 ### Tier 2 (after Tier 1 gates)
 

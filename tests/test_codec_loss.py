@@ -4,6 +4,7 @@ from desifm.training.codec_input import prepare_codec_batch_v4
 from desifm.training.codec_loss import (
     flux_rms,
     flux_std_ratio,
+    flux_std_ratio_per_sample,
     latent_index_entropy_penalty,
     physical_flux_loss,
     top_hat_smooth_flux,
@@ -57,3 +58,21 @@ def test_flux_metrics_grid_vs_native_mask():
     mask = torch.zeros(2, 7781, dtype=torch.bool)
     assert flux_rms(pred, target, mask).item() >= 0
     assert flux_std_ratio(pred, target, mask).item() > 0
+
+
+def test_flux_std_ratio_per_sample_vs_pooled():
+    target = torch.stack(
+        [
+            torch.sin(torch.linspace(0, 8, 64)),
+            torch.ones(64) * 3.0,
+        ]
+    )
+    pred = target.clone()
+    pred[1] = 1.0  # collapsed second spectrum
+    mask = torch.zeros(2, 64, dtype=torch.bool)
+    per = flux_std_ratio_per_sample(pred, target, mask)
+    assert per.shape == (2,)
+    assert per[0].item() > 0.9
+    assert per[1].item() < 0.1
+    pooled = flux_std_ratio(pred, target, mask).item()
+    assert pooled > per[1].item()  # batch pooling masks per-spec collapse

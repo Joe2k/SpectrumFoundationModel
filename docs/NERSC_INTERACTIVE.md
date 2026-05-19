@@ -53,7 +53,16 @@ python scripts/train_codec.py \
   --wandb-mode online
 ```
 
-Defaults with `--run-name codec_v4`: 20k steps, batch 32, lr 1e-4, warmup 1k, **cosine decay to min_lr 1e-6**, `λ_phys=0.5`, `λ_ent=0.1`, val every 500 steps. Disable decay with `--lr-schedule constant`.
+Defaults with `--codec-version v4`: 20k steps, batch 32, lr 1e-4, warmup 1k, **cosine decay to min_lr 1e-6**, **λ_phys ramp 0→0.5 over 4k steps**, `λ_ent=0.1`, val every 500. W&B logs `val/std_ratio_per_spec_median` (honest collapse metric) alongside pooled `val/std_ratio`.
+
+Suggested new run after `git pull`:
+
+```bash
+export RUN_NAME=codec_v4_tier1_cosine_ramp
+sbatch scripts/train_codec_ddp.slurm
+```
+
+Disable cosine or ramp: `--lr-schedule constant` and/or `--lambda-phys-ramp-steps 0`.
 
 ### codec_v4 DDP (4 GPUs, recommended for 20k steps)
 
