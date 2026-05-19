@@ -23,4 +23,5 @@ class SyntheticSpectrumDataset(Dataset):
         flux = torch.sin(x * 40) * 0.2 + torch.randn(self.length, generator=g) * 0.05 + 1.0
         ivar = torch.ones(self.length) * 10.0
         z = torch.rand(1, generator=g).item() * 1.2
-        return {"flux": flux, "ivar": ivar, "z": torch.tensor(z, dtype=torch.float32)}
+        mask = torch.zeros(self.length, dtype=torch.bool)
+        return {"flux": flux, "ivar": ivar, "mask": mask, "z": torch.tensor(z, dtype=torch.float32)}
