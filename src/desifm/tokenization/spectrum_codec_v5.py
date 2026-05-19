@@ -246,6 +246,7 @@ class SpectrumCodecV5(nn.Module):
         use_batch_entropy: bool = True,
         lambda_arcsinh: float = 0.25,
     ) -> dict:
+        x = self._resize(x)
         h, skips = self._encode(x)
         z_q, q_loss, indices = self.quant(h)
         indices = self._pad_indices(indices)

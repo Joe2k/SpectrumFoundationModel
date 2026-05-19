@@ -17,3 +17,20 @@ def test_spectrum_codec_v5_forward_shapes():
     assert out["recon_phys"].shape[0] == 2
     assert out["loss"].item() > 0
     assert model.quant.n_codes == 1024  # 2**10 latent_dim
+
+
+def test_spectrum_codec_v5_native_padded_length():
+    """Training batches are padded below GRID_SIZE; forward must resize for losses."""
+    from desifm.constants import GRID_SIZE
+
+    flux = torch.rand(2, 7781) + 0.5
+    ivar = torch.ones(2, 7781)
+    mask = torch.zeros(2, 7781, dtype=torch.bool)
+    batch = {"flux": flux, "ivar": ivar, "mask": mask}
+    x, denorm, m = prepare_codec_batch_for_style(batch, INPUT_STYLE_V4)
+    assert x.shape[-1] == 7781
+    model = SpectrumCodecV5(commitment_weight=0.05)
+    out = model(x, denorm, m, lambda_phys=0.5, lambda_entropy=0.5)
+    assert out["recon"].shape[-1] == GRID_SIZE
+    assert out["recon_phys"].shape[-1] == GRID_SIZE
+    assert out["target_phys"].shape[-1] == GRID_SIZE
