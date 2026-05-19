@@ -23,11 +23,17 @@ from desifm.tokenization.spectrum_codec import SpectrumCodec
 from desifm.training.codec_input import (
     INPUT_STYLE_V3,
     INPUT_STYLE_V4,
+    INPUT_STYLE_V5,
     prepare_codec_batch,
     prepare_codec_batch_for_style,
     prepare_codec_batch_v4,
 )
-from desifm.training.codec_loss import flux_rms, flux_std_ratio, flux_std_ratio_per_sample
+from desifm.training.codec_loss import (
+    code_usage_stats,
+    flux_rms,
+    flux_std_ratio,
+    flux_std_ratio_per_sample,
+)
 from desifm.training.distributed import (
     all_ranks_agree_skip,
     cleanup_distributed,
@@ -62,20 +68,35 @@ def append_metrics(path: Path, record: dict) -> None:
 
 
 def prepare_batch(batch: dict, input_style: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    if input_style == INPUT_STYLE_V4:
+    if input_style in (INPUT_STYLE_V4, INPUT_STYLE_V5):
         return prepare_codec_batch_v4(batch)
     if input_style == INPUT_STYLE_V3:
         return prepare_codec_batch(batch)
     return prepare_codec_batch_for_style(batch, input_style)
 
 
+def model_forward_kw(codec_version: str) -> dict:
+    if codec_version in ("v5a", "v5"):
+        return {"use_batch_entropy": True}
+    return {}
+
+
+def n_codes_for_model(model: torch.nn.Module) -> int:
+    if hasattr(model, "quant") and hasattr(model.quant, "n_codes"):
+        return int(model.quant.n_codes)
+    if hasattr(model, "latent_dim"):
+        return 2 ** int(model.latent_dim)
+    return 256
+
+
 @torch.no_grad()
 def run_validation(
-    model: SpectrumCodec,
+    model: torch.nn.Module,
     loader: DataLoader,
     device: torch.device,
     input_style: str,
     *,
+    codec_version: str,
     lambda_phys: float,
     lambda_entropy: float,
     max_batches: int = 32,
@@ -91,8 +112,12 @@ def run_validation(
         "rms": 0.0,
         "std_ratio": 0.0,
         "std_ratio_per_spec_median": 0.0,
+        "n_unique_codes": 0.0,
+        "code_usage_fraction": 0.0,
     }
     per_spec_ratios: list[float] = []
+    fwd_extra = model_forward_kw(codec_version)
+    n_codes = n_codes_for_model(model)
     for batch in loader:
         if batch is None:
             continue
@@ -104,8 +129,10 @@ def run_validation(
             mask,
             lambda_phys=lambda_phys,
             lambda_entropy=lambda_entropy,
+            **fwd_extra,
         )
         mask_g = mask
+        usage = code_usage_stats(out["indices"], n_codes=n_codes)
         totals["loss"] += float(out["loss"].item())
         totals["recon"] += float(out["recon_loss"].item())
         totals["phys"] += float(out["phys_loss"].item())
@@ -115,6 +142,8 @@ def run_validation(
         totals["std_ratio"] += float(
             flux_std_ratio(out["recon_phys"], out["target_phys"], mask_g).item()
         )
+        totals["n_unique_codes"] += float(usage["n_unique"])
+        totals["code_usage_fraction"] += float(usage["usage_fraction"])
         per_spec_ratios.extend(
             flux_std_ratio_per_sample(out["recon_phys"], out["target_phys"], mask_g).tolist()
         )
@@ -166,22 +195,22 @@ def lambda_ramp_scale(step: int, ramp_steps: int) -> float:
 def infer_codec_version(run_name: str, explicit: str | None) -> str:
     if explicit:
         return explicit
+    if "v5b" in run_name or run_name.endswith("_v5"):
+        return "v5"
+    if run_name.startswith("codec_v5"):
+        return "v5a"
     if run_name.startswith("codec_v4"):
         return "v4"
     return "v3"
 
 
-def apply_version_defaults(args: argparse.Namespace) -> None:
-    if args.codec_version != "v4":
-        return
+def _apply_tier1_training_defaults(args: argparse.Namespace) -> None:
     if args.steps == 5000:
         args.steps = 20_000
     if args.batch_size == 16:
         args.batch_size = 32
     if args.lr == 3e-4:
         args.lr = 1e-4
-    if args.checkpoint_metric == "median":
-        args.checkpoint_metric = "val_rms"
     if args.healpix_holdout_frac == 0.0:
         args.healpix_holdout_frac = 0.05
     if args.val_every == 0:
@@ -190,13 +219,36 @@ def apply_version_defaults(args: argparse.Namespace) -> None:
         args.lr_schedule = "cosine"
     if args.lambda_phys_ramp_steps == 0:
         args.lambda_phys_ramp_steps = 4000
+    if getattr(args, "warmup_steps", 0) == 0:
+        args.warmup_steps = 1000
+
+
+def apply_version_defaults(args: argparse.Namespace) -> None:
+    if args.codec_version == "v4":
+        _apply_tier1_training_defaults(args)
+        if args.checkpoint_metric == "median":
+            args.checkpoint_metric = "val_rms"
+    elif args.codec_version == "v5a":
+        _apply_tier1_training_defaults(args)
+        if args.checkpoint_metric == "median":
+            args.checkpoint_metric = "val_std_ratio_per_spec_median"
+        if args.min_code_usage_fraction == 0.0:
+            args.min_code_usage_fraction = 0.3
+    elif args.codec_version == "v5":
+        _apply_tier1_training_defaults(args)
+        if args.checkpoint_metric == "median":
+            args.checkpoint_metric = "val_std_ratio_per_spec_median"
+        if args.min_code_usage_fraction == 0.0:
+            args.min_code_usage_fraction = 0.3
+        if args.weight_decay == 0.0:
+            args.weight_decay = 0.05
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--manifest", type=Path, default=None)
     p.add_argument("--run-name", default="codec_v3")
-    p.add_argument("--codec-version", choices=["v3", "v4"], default=None)
+    p.add_argument("--codec-version", choices=["v3", "v4", "v5a", "v5"], default=None)
     p.add_argument("--scratch-out", type=Path, default=None)
     p.add_argument("--steps", type=int, default=5000)
     p.add_argument("--batch-size", type=int, default=16)
@@ -219,10 +271,17 @@ def main():
     p.add_argument("--max-loss", type=float, default=50.0, help="Skip steps with loss above this")
     p.add_argument(
         "--checkpoint-metric",
-        choices=["median", "mean", "val_rms"],
+        choices=["median", "mean", "val_rms", "val_std_ratio_per_spec_median"],
         default="median",
-        help="Train window aggregate (v3) or val physical RMS (v4)",
+        help="Train window (v3), val RMS (v4), or per-spec std_ratio median (v5a/v5)",
     )
+    p.add_argument(
+        "--min-code-usage-fraction",
+        type=float,
+        default=0.0,
+        help="Reject val checkpoints when unique-code fraction is below this (v5a/v5 default 0.3)",
+    )
+    p.add_argument("--weight-decay", type=float, default=0.0)
     p.add_argument("--healpix-holdout-frac", type=float, default=0.0)
     p.add_argument("--healpix-split-seed", type=int, default=42)
     p.add_argument("--val-every", type=int, default=0, help="Run val every N steps (0=disabled)")
@@ -247,17 +306,21 @@ def main():
     args.codec_version = infer_codec_version(args.run_name, args.codec_version)
     apply_version_defaults(args)
 
-    input_style = INPUT_STYLE_V4 if args.codec_version == "v4" else INPUT_STYLE_V3
-    if args.codec_version == "v4":
+    if args.codec_version == "v5":
+        input_style = INPUT_STYLE_V5
+    elif args.codec_version in ("v4", "v5a"):
+        input_style = INPUT_STYLE_V4
+    else:
+        input_style = INPUT_STYLE_V3
+
+    if args.codec_version in ("v4", "v5a", "v5"):
         if args.lambda_phys == 0.0:
             args.lambda_phys = 0.5
         if args.lambda_entropy == 0.0:
-            args.lambda_entropy = 0.1
-        if args.warmup_steps == 0:
-            args.warmup_steps = 1000
+            args.lambda_entropy = 0.75 if args.codec_version in ("v5a", "v5") else 0.1
     commitment = args.commitment_weight
     if commitment is None:
-        commitment = 0.05 if args.codec_version == "v4" else 0.25
+        commitment = 0.05 if args.codec_version in ("v4", "v5a", "v5") else 0.25
 
     rank, world_size, local_rank, device = setup_distributed()
     main_proc = is_main_process(rank)
@@ -317,7 +380,6 @@ def main():
     tracker = LossTracker(window=args.log_every, max_loss=args.max_loss) if main_proc and use_train_tracker else None
 
     if main_proc:
-        n_params = sum(p.numel() for p in SpectrumCodec(commitment_weight=commitment).parameters())
         log.info("=== spectrum codec %s (%s) ===", args.codec_version, input_style)
         log.info("run_dir=%s", run_dir)
         log.info("manifest=%s", manifest_path or "(synthetic)")
@@ -350,9 +412,19 @@ def main():
             args.num_workers,
         )
 
-    model = SpectrumCodec(commitment_weight=commitment).to(device)
+    if args.codec_version == "v5":
+        from desifm.tokenization.spectrum_codec_v5 import SpectrumCodecV5
+
+        model = SpectrumCodecV5(commitment_weight=commitment).to(device)
+    else:
+        model = SpectrumCodec(commitment_weight=commitment).to(device)
     model = wrap_ddp(model, device, world_size)
-    opt = torch.optim.AdamW(unwrap(model).parameters(), lr=args.lr)
+    opt = torch.optim.AdamW(
+        unwrap(model).parameters(),
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+    )
+    fwd_extra = model_forward_kw(args.codec_version)
     wb = init_run(args.wandb_mode, args.run_name, vars(args), run_dir / "wandb", group="phase2-codec") if main_proc else None
     if main_proc and wb is not None:
         log.info("wandb run: %s", getattr(wb, "url", wb.name))
@@ -376,10 +448,24 @@ def main():
         assert tracker is not None
         return tracker.window_median() if args.checkpoint_metric == "median" else tracker.window_mean()
 
+    def checkpoint_metric_value(val_stats: dict[str, float]) -> float:
+        if args.checkpoint_metric == "val_std_ratio_per_spec_median":
+            return -val_stats["std_ratio_per_spec_median"]
+        return val_stats["rms"]
+
     def save_best(metric: float, val_stats: dict[str, float] | None = None) -> None:
         nonlocal best_metric
         if metric >= best_metric:
             return
+        if val_stats is not None and args.min_code_usage_fraction > 0:
+            if val_stats.get("code_usage_fraction", 0.0) < args.min_code_usage_fraction:
+                if main_proc and log:
+                    log.info(
+                        "skip checkpoint: code_usage=%.3f < %.3f",
+                        val_stats["code_usage_fraction"],
+                        args.min_code_usage_fraction,
+                    )
+                return
         best_metric = metric
         payload = {
             "model": unwrap(model).state_dict(),
@@ -423,6 +509,7 @@ def main():
             mask,
             lambda_phys=lambda_phys_eff,
             lambda_entropy=args.lambda_entropy,
+            **fwd_extra,
         )
         loss = out["loss"]
 
@@ -515,18 +602,22 @@ def main():
                     val_loader,
                     device,
                     input_style,
+                    codec_version=args.codec_version,
                     lambda_phys=args.lambda_phys,
                     lambda_entropy=args.lambda_entropy,
                     max_batches=args.val_max_batches,
                 )
                 append_metrics(metrics_path, {"kind": "val", "step": step, **val_stats})
                 log.info(
-                    "val step=%d rms=%.4f recon=%.4f std_ratio=%.3f std_med=%.3f q=%.4f ent=%.4f",
+                    "val step=%d rms=%.4f recon=%.4f std_ratio=%.3f std_med=%.3f "
+                    "codes=%.0f usage=%.3f q=%.4f ent=%.4f",
                     step,
                     val_stats["rms"],
                     val_stats["recon"],
                     val_stats["std_ratio"],
                     val_stats["std_ratio_per_spec_median"],
+                    val_stats["n_unique_codes"],
+                    val_stats["code_usage_fraction"],
                     val_stats["q"],
                     val_stats["entropy"],
                 )
@@ -539,13 +630,15 @@ def main():
                         "val/rms_flux": val_stats["rms"],
                         "val/std_ratio": val_stats["std_ratio"],
                         "val/std_ratio_per_spec_median": val_stats["std_ratio_per_spec_median"],
+                        "val/n_unique_codes": val_stats["n_unique_codes"],
+                        "val/code_usage_fraction": val_stats["code_usage_fraction"],
                         "val/q_loss": val_stats["q"],
                         "val/entropy_penalty": val_stats["entropy"],
                     },
                     step,
                 )
-                if args.checkpoint_metric == "val_rms":
-                    save_best(val_stats["rms"], val_stats)
+                if args.checkpoint_metric in ("val_rms", "val_std_ratio_per_spec_median"):
+                    save_best(checkpoint_metric_value(val_stats), val_stats)
 
         step += 1
 

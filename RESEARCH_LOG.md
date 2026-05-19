@@ -195,7 +195,50 @@ python scripts/train_codec.py \
 
 ---
 
-## 2026-05-19: **codec_v4** plan (in progress)
+## 2026-05-19: **codec_v4_tier1_ddp** finished (20k steps)
+
+**Run:** [cu95nwot](https://wandb.ai/jjayaseelan-university-of-san-francisco/desi-fm-2026/runs/cu95nwot) — 4×GPU DDP, flat LR (pre–cosine/ramp code).
+
+| Metric (end / best) | Value |
+|---------------------|--------|
+| `val/rms_flux` (checkpoint) | **5.25** @ ~step 19500 |
+| `val/std_ratio` (pooled) | **0.94** |
+| `val/recon_arcsinh` | ~0.004 |
+| Skipped steps | 4 |
+
+**Next:** Download `codec_v4_tier1_ddp-codec-best`, run `03_phase_codec_eval.ipynb` per-spectrum table (`std_ratio` gate > 0.5). Pooled W&B metric can look healthy while single-healpix plots stay flat — use per-spec median before Tier 2.
+
+**In flight:** `codec_v4_tier1_cosine_ramp` (cosine + λ_phys ramp) for comparison.
+
+### Why v4 plots failed (not just plotting)
+
+| Issue | Detail |
+|-------|--------|
+| **Codebook collapse** | `best.pt` uses ~**2/256** LFQ indices; `entropy_penalty ≈ 0.99` |
+| **Decoder** | No U-Net skips / cross-attn (FM V2 has both) |
+| **Metrics** | Pooled `val/std_ratio ≈ 0.94` vs **per-spec median ≈ 0.11** on eval healpix 0 |
+| **Eval tile** | Local hp 0 is **in-train** for `dr1_1k_scratch` seed 42; W&B val is ~50 held-out healpix |
+
+**Do not** ship `codec_v4_tier1_ddp` as the production tokenizer until code usage > 30% and per-spec `std_ratio` > 0.5.
+
+---
+
+## 2026-05-19: **codec v5** (v5a + v5b)
+
+Two-stage plan (see plan doc in Cursor, not committed):
+
+| Stage | What | Success gates |
+|-------|------|----------------|
+| **v5a** | v4 backbone + FM **batch entropy**, `λ_ent≈0.75`, checkpoint `val/std_ratio_per_spec_median`, reject if `code_usage_fraction < 0.3` | ≥77 unique codes (30% of 256), per-spec median > 0.5 |
+| **v5b** | `SpectrumCodecV5` — skips, cross-attn, `latent_dim=10`, physical MSE primary | Same + visual line structure in notebook 03 |
+
+**Train (NERSC):** `codec_v5a_antollapse` (`--codec-version v5a`), then `codec_v5b` (`--codec-version v5`). See `docs/NERSC_INTERACTIVE.md`.
+
+**Eval:** Regenerate `03_phase_codec_eval.ipynb` — code-usage audit cell, val healpix download, per-spec collapse table.
+
+---
+
+## 2026-05-19: **codec_v4** plan
 
 **Goal:** Spectrum tokenizer that reconstructs real DESI coadds on **held-out healpix**, not just low arcsinh loss.
 

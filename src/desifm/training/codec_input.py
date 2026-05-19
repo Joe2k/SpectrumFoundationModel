@@ -13,6 +13,7 @@ NORM_MIN = 0.1
 
 INPUT_STYLE_V3 = "mask_arcsinh_v3"
 INPUT_STYLE_V4 = "mask_arcsinh_v4"
+INPUT_STYLE_V5 = "mask_arcsinh_v5"
 
 
 def normalize_spectrum_input(
@@ -185,8 +186,8 @@ def prepare_codec_batch_for_style(
     """Like :func:`prepare_codec_batch` but selects v2 vs v3 normalization."""
     flux, ivar = batch["flux"], batch["ivar"]
     mask = batch.get("mask")
-    if input_style in (INPUT_STYLE_V3, INPUT_STYLE_V4):
-        if input_style == INPUT_STYLE_V4:
+    if input_style in (INPUT_STYLE_V3, INPUT_STYLE_V4, INPUT_STYLE_V5):
+        if input_style in (INPUT_STYLE_V4, INPUT_STYLE_V5):
             x, denorm, mask = prepare_codec_batch_v4(batch)
             return x, denorm, mask
         x, denorm = normalize_spectrum_input(flux, ivar, mask)

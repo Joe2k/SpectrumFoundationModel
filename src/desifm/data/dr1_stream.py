@@ -112,6 +112,17 @@ def collate_spectra(batch: list) -> dict | None:
     }
 
 
+def val_healpix_ids(records: list[dict], holdout: float = 0.05, seed: int = 42) -> list[int]:
+    """Healpix IDs in the validation fold (for notebook / offline eval)."""
+    if not 0 < holdout < 1:
+        raise ValueError("holdout must be in (0, 1)")
+    rng = np.random.default_rng(seed)
+    hp = sorted({int(r.get("healpix", i)) for i, r in enumerate(records)})
+    rng.shuffle(hp)
+    n_val = max(1, int(len(hp) * holdout))
+    return [int(h) for h in hp[:n_val]]
+
+
 def healpix_split(records: list[dict], holdout: float, seed: int) -> tuple[list, list]:
     if not 0 < holdout < 1:
         raise ValueError("holdout must be in (0, 1)")

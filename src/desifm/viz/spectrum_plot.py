@@ -199,3 +199,28 @@ def plot_spectrum_with_lines(
     if title:
         ax.set_title(title)
     ax.legend(loc="upper right", fontsize=8)
+
+
+def plot_reconstruction_fm_style(
+    ax,
+    wavelength: np.ndarray,
+    flux: np.ndarray,
+    recon: np.ndarray,
+    z: float,
+    *,
+    mask: np.ndarray | None = None,
+    k_std: float = 5.0,
+) -> None:
+    """Physical-flux overlay (black target, red recon) with FM-style median ± k·σ y-limits."""
+    good = _good_pixel_mask(flux, mask)
+    ax.plot(wavelength, flux, "k-", lw=0.7, label="target")
+    ax.plot(wavelength, recon, color="crimson", lw=0.7, alpha=0.9, label="recon")
+    ylim = _adaptive_ylim(flux, mask, ivar=None, k_std=k_std)
+    if ylim is not None:
+        lo, hi = ylim
+        if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+            ax.set_ylim(lo, hi)
+    ax.set_xlabel("observed wavelength (Å)")
+    ax.set_ylabel("flux")
+    ax.set_title(f"z={z:.4f}")
+    ax.legend(loc="upper right", fontsize=8)

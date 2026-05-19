@@ -94,6 +94,36 @@ torchrun --standalone --nnodes=1 --nproc_per_node=4 scripts/train_codec.py \
 
 Per-GPU batch 32 → **effective batch 128** across 4 GPUs. Checkpoints: `$NERSC_SCRATCH_ROOT/checkpoints/<run_name>/`.
 
+### codec_v5a (anti-collapse, v4 backbone)
+
+Same architecture as v4; FM-style **batch entropy**, stronger `λ_ent`, checkpoint on **per-spec** `std_ratio` median, skip save if code usage &lt; 30%.
+
+```bash
+torchrun --standalone --nnodes=1 --nproc_per_node=4 scripts/train_codec.py \
+  --manifest $NERSC_SCRATCH_ROOT/manifests/dr1_1k_scratch.jsonl \
+  --run-name codec_v5a_antollapse \
+  --codec-version v5a \
+  --batch-size 32 \
+  --num-workers 8 \
+  --wandb-mode online
+```
+
+### codec_v5b (FM V2–inspired tokenizer)
+
+`SpectrumCodecV5`: U-Net skips, cross-attention, `latent_dim=10`, physical flux MSE primary.
+
+```bash
+torchrun --standalone --nnodes=1 --nproc_per_node=4 scripts/train_codec.py \
+  --manifest $NERSC_SCRATCH_ROOT/manifests/dr1_1k_scratch.jsonl \
+  --run-name codec_v5b \
+  --codec-version v5 \
+  --batch-size 32 \
+  --num-workers 8 \
+  --wandb-mode online
+```
+
+Watch W&B: `val/n_unique_codes`, `val/code_usage_fraction`, `val/std_ratio_per_spec_median`.
+
 ### codec_v3 (legacy)
 
 Mask-aware arcsinh + Huber; checkpoint on train loss median.

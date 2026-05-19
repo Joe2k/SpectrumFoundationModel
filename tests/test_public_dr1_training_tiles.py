@@ -23,6 +23,34 @@ def test_discover_public_training_tiles(monkeypatch):
     assert tiles == [("main", "bright", "0", 0)]
 
 
+def test_group_from_manifest_record():
+    rec = {
+        "coadd": "/data/spectro/redux/iron/healpix/main/bright/0/42/coadd-main-bright-42.fits",
+        "healpix": 42,
+    }
+    assert pd.group_from_manifest_record(rec) == "0"
+
+
+def test_tiles_for_healpix_from_records():
+    recs = [
+        {
+            "survey": "main",
+            "program": "dark",
+            "healpix": 7,
+            "coadd": "/x/spectro/redux/iron/healpix/main/dark/0/7/coadd.fits",
+        }
+    ]
+    assert pd.tiles_for_healpix([7], records=recs) == [("main", "dark", "0", 7)]
+
+
+def test_tiles_for_healpix_portal_probe(monkeypatch):
+    def fake_exists(survey, program, group, healpix, **kwargs):
+        return survey == "main" and program == "dark" and group == "0" and healpix == 25
+
+    monkeypatch.setattr(pd, "tile_exists_on_public", fake_exists)
+    assert pd.tiles_for_healpix([25]) == [("main", "dark", "0", 25)]
+
+
 def test_discover_respects_max_tiles(monkeypatch):
     def fake_exists(survey, program, group, healpix, **kwargs):
         return survey == "main" and healpix < 2

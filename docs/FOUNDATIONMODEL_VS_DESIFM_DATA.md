@@ -38,10 +38,22 @@ So: FoundationModel plots were tuned to **avoid autoscale traps** (good-only err
 | | FoundationModel (`src/tokenizers/spectrum.py` v1) | FoundationModel (`spectrum_v2.py`) | `desifm` (`training/codec_input.py`) |
 |---|----------------------------------|--------------------------------------|----------------------------------------|
 | **Norm scale** | Mean of flux on **`flux > 0`** only (+ clamps, log10 denorm, ×0.2, **arcsinh**) | Same family + **5-pixel top-hat** on normalized grid before encoder | Mean on **good pixels** `~mask` (+ `nan_to_num`, **ivar ≤ 100**, same log10 denorm + arcsinh) |
-| **Smoothing** | None in v1 | **Top-hat** pre-encoder | **None** in current Tier-A codec |
+| **Smoothing** | None in v1 | **Top-hat** pre-encoder | **Top-hat** in v4/v5 (`mask_arcsinh_v4` / v5) |
 | **Grid** | Interpolate to **8704** inside tokenizer | Same | **`GRID_SIZE` 8704** in `SpectrumCodec` |
 
 Exploratory notebooks should compare **raw stitched flux** (or FM-style `plot_spectrum`) to avoid mixing in codec-normalized panels, which are **supposed** to look flat-ish in arcsinh space.
+
+## Tokenizer architecture (why FM V2 reconstructs better)
+
+| | FoundationModel `spectrum_v2.py` | `desifm` v4 (`spectrum_codec.py`) | `desifm` v5 (`spectrum_codec_v5.py`) |
+|---|-----------------------------------|-----------------------------------|--------------------------------------|
+| **Decoder** | U-Net **skip connections** + **cross-attention** to encoder features | Bottleneck-only decoder | Skips + cross-attn (FM recipe) |
+| **Latent** | `latent_dim=10`, `quant_conv` / `post_quant_conv` | `latent_dim=8`, direct `to_latent` → LFQ | `latent_dim=10` + quant convs |
+| **Entropy** | Batch histogram over all indices in minibatch | Per-forward index penalty (v4 collapsed to ~2 codes) | FM batch entropy + stronger `λ_ent` |
+| **Primary recon loss** | MSE on **denormalized physical flux** | Huber on **arcsinh** (+ optional `λ_phys`) | Physical MSE primary; arcsinh auxiliary |
+| **Val checkpoint** | `val_recon` (physical MSE) | `val/rms_flux` (pooled `std_ratio` misleading) | `val/std_ratio_per_spec_median` + code-usage gate |
+
+Eval: `notebooks/03_phase_codec_eval.ipynb` — code-usage audit, per-spec collapse table, optional val healpix tile.
 
 ## Where to look in FoundationModel
 

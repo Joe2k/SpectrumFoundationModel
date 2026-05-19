@@ -46,6 +46,63 @@ def physical_flux_loss(
     return masked_recon_loss(recon_phys, target_phys, mask, huber_delta=huber_delta)
 
 
+def batch_codebook_entropy_loss(indices: torch.Tensor, n_bins: int = 256) -> torch.Tensor:
+    """FM-style penalty: low entropy of the code histogram over the whole batch (0 = uniform)."""
+    flat = indices.reshape(-1)
+    if flat.numel() == 0:
+        return torch.zeros((), device=indices.device)
+    hist = torch.bincount(flat, minlength=n_bins).float()
+    total = hist.sum()
+    if total <= 0:
+        return torch.ones((), device=indices.device)
+    p = (hist / total).clamp(min=1e-10)
+    p = p[p > 0]
+    entropy = -(p * torch.log(p)).sum()
+    max_ent = math.log(max(n_bins, 2))
+    return ((max_ent - entropy) / max_ent).clamp(min=0.0, max=1.0)
+
+
+def code_usage_stats(indices: torch.Tensor, n_codes: int = 256) -> dict[str, float | int | list[tuple[int, int]]]:
+    """Summarize LFQ index usage for one forward pass (batch)."""
+    flat = indices.reshape(-1)
+    device = indices.device
+    if flat.numel() == 0:
+        return {
+            "n_unique": 0,
+            "n_codes": n_codes,
+            "usage_fraction": 0.0,
+            "entropy_penalty": 1.0,
+            "top_codes": [],
+            "per_row_n_unique": [],
+        }
+    hist = torch.bincount(flat, minlength=n_codes)
+    used_mask = hist > 0
+    n_unique = int(used_mask.sum().item())
+    used_ids = torch.nonzero(used_mask, as_tuple=False).flatten()
+    if used_ids.numel() == 0:
+        top_codes: list[tuple[int, int]] = []
+    else:
+        vals = hist[used_ids]
+        order = torch.argsort(vals, descending=True)
+        top_codes = [
+            (int(used_ids[i].item()), int(vals[i].item()))
+            for i in order[:10]
+        ]
+    per_row: list[float] = []
+    for b in range(indices.shape[0]):
+        row = indices[b].reshape(-1)
+        per_row.append(float(len(torch.unique(row))))
+    return {
+        "n_unique": n_unique,
+        "n_codes": n_codes,
+        "usage_fraction": n_unique / max(n_codes, 1),
+        "entropy_penalty": float(latent_index_entropy_penalty(indices, n_bins=n_codes).item()),
+        "batch_entropy_penalty": float(batch_codebook_entropy_loss(indices, n_bins=n_codes).item()),
+        "top_codes": top_codes,
+        "per_row_n_unique": per_row,
+    }
+
+
 def latent_index_entropy_penalty(indices: torch.Tensor, n_bins: int = 256) -> torch.Tensor:
     """Penalty when latent indices are low-entropy (codebook collapse). Returns >= 0."""
     flat = indices.reshape(-1)

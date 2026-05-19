@@ -12,17 +12,19 @@ import torch.nn.functional as F
 from desifm.constants import GRID_SIZE
 from desifm.training.codec_input import (
     INPUT_STYLE_V4,
+    INPUT_STYLE_V5,
     denormalize_spectrum_output,
     prepare_codec_batch_for_style,
     prepare_codec_v2_linear,
 )
+from desifm.training.codec_loss import code_usage_stats
 from desifm.tokenization.spectrum_codec import SpectrumCodec
 
 
 def input_style_from_checkpoint(ckpt: dict[str, Any]) -> str:
     """Infer normalization / forward path from checkpoint metadata."""
     s = ckpt.get("input_style")
-    if s in ("mask_arcsinh_v3", INPUT_STYLE_V4):
+    if s in ("mask_arcsinh_v3", INPUT_STYLE_V4, INPUT_STYLE_V5):
         return s
     # codec_v2 (nv7py9b1) was trained with linear median scaling, not arcsinh.
     return "codec_v2_linear"
@@ -46,15 +48,69 @@ def resample_1d(flux_1d: torch.Tensor, length: int) -> torch.Tensor:
     return F.interpolate(x, size=length, mode="linear", align_corners=False).reshape(length)
 
 
-def load_spectrum_codec(ckpt_path: Path, device: torch.device) -> tuple[SpectrumCodec, str]:
+def _codec_version_from_checkpoint(blob: dict[str, Any]) -> str:
+    v = blob.get("codec_version")
+    if v == "v5":
+        return "v5"
+    if v in ("v4", "v5a") or blob.get("input_style") in (INPUT_STYLE_V4, INPUT_STYLE_V5):
+        return "v4"
+    return "v3"
+
+
+def load_spectrum_codec(ckpt_path: Path, device: torch.device) -> tuple[torch.nn.Module, str]:
     """Load weights and return ``(model, input_style)``."""
     ckpt = Path(ckpt_path)
     blob = torch.load(ckpt, map_location=device, weights_only=False)
     style = input_style_from_checkpoint(blob)
-    model = SpectrumCodec().to(device)
-    model.load_state_dict(blob["model"])
+    version = _codec_version_from_checkpoint(blob)
+    if style == INPUT_STYLE_V5 and version != "v5":
+        style = INPUT_STYLE_V4
+    commitment = float(blob.get("commitment_weight", 0.05))
+    if version == "v5":
+        from desifm.tokenization.spectrum_codec_v5 import SpectrumCodecV5
+
+        model = SpectrumCodecV5(commitment_weight=commitment).to(device)
+    else:
+        model = SpectrumCodec(commitment_weight=commitment).to(device)
+    model.load_state_dict(blob["model"], strict=False)
     model.eval()
     return model, style
+
+
+@torch.no_grad()
+def audit_code_usage(
+    model: torch.nn.Module,
+    batch: dict[str, torch.Tensor],
+    input_style: str,
+    device: torch.device,
+    *,
+    lambda_phys: float = 0.0,
+    lambda_entropy: float = 0.0,
+    use_batch_entropy: bool = False,
+) -> dict[str, Any]:
+    """Forward once and return codebook usage stats (collapse diagnostic)."""
+    if input_style == "codec_v2_linear":
+        raise ValueError("code usage audit applies to arcsinh codecs (v3/v4/v5), not codec_v2_linear")
+
+    batch_d = {k: v.to(device) if torch.is_tensor(v) else v for k, v in batch.items()}
+    x, denorm, mask = prepare_codec_batch_for_style(batch_d, input_style)
+    forward_kw: dict[str, Any] = {
+        "lambda_phys": lambda_phys,
+        "lambda_entropy": lambda_entropy,
+    }
+    if hasattr(model, "forward") and "use_batch_entropy" in model.forward.__code__.co_varnames:
+        forward_kw["use_batch_entropy"] = use_batch_entropy
+    out = model(x, denorm, mask=mask, **forward_kw)
+    n_codes = 256
+    if hasattr(model, "quant") and hasattr(model.quant, "n_codes"):
+        n_codes = int(model.quant.n_codes)
+    elif hasattr(model, "quantizer") and hasattr(model.quantizer, "codebook_size"):
+        n_codes = int(model.quantizer.codebook_size)
+    stats = code_usage_stats(out["indices"], n_codes=n_codes)
+    stats["recon_loss"] = float(out["recon_loss"].item())
+    stats["q_loss"] = float(out["q_loss"].item())
+    stats["entropy_loss"] = float(out.get("entropy_loss", torch.tensor(0.0)).item())
+    return stats
 
 
 def forward_v2_legacy(

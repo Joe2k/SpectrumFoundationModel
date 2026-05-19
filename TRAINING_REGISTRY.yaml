@@ -28,21 +28,57 @@ runs:
     wandb_id: cu95nwot
     wandb_url: https://wandb.ai/jjayaseelan-university-of-san-francisco/desi-fm-2026/runs/cu95nwot
     phase: phase2-codec
-    state: running
+    state: finished
     manifest: dr1_1k_scratch.jsonl
     steps: 20000
+    runtime_sec: 7295
+    best_val_rms_flux: 5.25
+    best_val_std_ratio_pooled: 0.94
     wandb_artifact: codec_v4_tier1_ddp-codec-best
     checkpoint: deepsrch/checkpoints/codec_v4_tier1_ddp/best.pt
     notes: >
-      Tier 1 v4 DDP (4 GPU): dual loss, healpix holdout, checkpoint on val/rms_flux,
-      mask_arcsinh_v4 + top-hat. Eval notebook downloads artifact codec_v4_tier1_ddp-codec-best.
+      Tier 1 v4 DDP (4 GPU), 20k steps, flat LR 1e-4 after 1k warmup (no cosine/ramp).
+      Best checkpoint step ~19500 on val/rms_flux. Pooled val/std_ratio ~0.94 but
+      notebook 03 per-spec median ~0.11 and ~2/256 LFQ codes — code-collapsed; not production.
+
+  - run_name: codec_v4_tier1_cosine_ramp
+    wandb_id: lfi6hgqt
+    wandb_url: https://wandb.ai/jjayaseelan-university-of-san-francisco/desi-fm-2026/runs/lfi6hgqt
+    phase: phase2-codec
+    state: running
+    manifest: dr1_1k_scratch.jsonl
+    steps: 20000
+    wandb_artifact: codec_v4_tier1_cosine_ramp-codec-best
+    checkpoint: deepsrch/checkpoints/codec_v4_tier1_cosine_ramp/best.pt
+    notes: >
+      Tier 1 rerun with cosine LR decay + lambda_phys ramp 4k; watch val/std_ratio_per_spec_median.
+
+  - run_name: codec_v5a_antollapse
+    wandb_id: null
+    phase: phase2-codec
+    state: planned
+    manifest: dr1_1k_scratch.jsonl
+    steps: 20000
+    notes: >
+      v4 backbone + FM batch entropy (λ_ent 0.75), checkpoint on val/std_ratio_per_spec_median,
+      reject best if code_usage_fraction < 0.3. Run before v5b.
+
+  - run_name: codec_v5b
+    wandb_id: null
+    phase: phase2-codec
+    state: planned
+    manifest: dr1_1k_scratch.jsonl
+    steps: 20000
+    notes: >
+      SpectrumCodecV5 (skips, cross-attn, latent_dim=10, physical MSE primary).
+      --codec-version v5; same val gates as v5a.
 
   - run_name: codec_v4
     wandb_id: null
     phase: phase2-codec
     state: superseded
     manifest: dr1_1k_scratch.jsonl
-    notes: Use codec_v4_tier1_ddp for Tier 1 eval.
+    notes: Use codec_v4_tier1_ddp for Tier 1 eval (collapsed); v5a/v5b for production path.
 
   - run_name: codec_v1
     wandb_id: efvc5599

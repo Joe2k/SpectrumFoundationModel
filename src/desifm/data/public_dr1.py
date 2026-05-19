@@ -76,6 +76,59 @@ def tile_exists_on_public(
         return False
 
 
+def group_from_manifest_record(rec: dict) -> str:
+    """Infer iron ``group`` directory from a manifest record's coadd path."""
+    coadd = str(rec.get("coadd", ""))
+    parts = Path(coadd).parts
+    try:
+        i = parts.index("healpix")
+        return parts[i + 3]
+    except (ValueError, IndexError):
+        return _healpix_group_candidates(int(rec["healpix"]))[0]
+
+
+def tiles_for_healpix(
+    healpix_ids: Sequence[int],
+    *,
+    records: Sequence[dict] | None = None,
+    public_base: str = PUBLIC_DR1_BASE_DEFAULT,
+    timeout_seconds: float = 20.0,
+) -> list[tuple[str, str, str, int]]:
+    """Build ``(survey, program, group, healpix)`` tuples for :func:`ensure_dr1_tiles_local`.
+
+    Uses manifest records when available; otherwise probes the public portal in training walk order.
+    """
+    by_hp: dict[int, dict] = {int(r["healpix"]): r for r in records} if records else {}
+    out: list[tuple[str, str, str, int]] = []
+    for hp in healpix_ids:
+        hp = int(hp)
+        rec = by_hp.get(hp)
+        if rec is not None:
+            out.append((rec["survey"], rec["program"], group_from_manifest_record(rec), hp))
+            continue
+        resolved: tuple[str, str, str, int] | None = None
+        for survey in TRAINING_WALK_SURVEYS:
+            for program in TRAINING_WALK_PROGRAMS:
+                for group in _healpix_group_candidates(hp):
+                    if tile_exists_on_public(
+                        survey,
+                        program,
+                        group,
+                        hp,
+                        public_base=public_base,
+                        timeout_seconds=timeout_seconds,
+                    ):
+                        resolved = (survey, program, group, hp)
+                        break
+                if resolved is not None:
+                    break
+            if resolved is not None:
+                break
+        if resolved is not None:
+            out.append(resolved)
+    return out
+
+
 def discover_public_training_tiles(
     max_tiles: int = 1,
     *,

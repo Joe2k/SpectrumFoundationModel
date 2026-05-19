@@ -12,6 +12,7 @@ from desifm.constants import GRID_SIZE, N_LATENT_TOKENS
 from desifm.training.codec_input import denormalize_spectrum_output, masked_recon_loss
 from desifm.training.codec_loss import (
     align_mask_to_length,
+    batch_codebook_entropy_loss,
     latent_index_entropy_penalty,
     physical_flux_loss,
 )
@@ -71,10 +72,10 @@ class Upsample(nn.Module):
 class LFQuantizer(nn.Module):
     """Lookup-free quantizer: each dim in {-1, +1}, index = binary code."""
 
-    def __init__(self, dim: int = 8, n_codes: int = 256, commitment_weight: float = 0.25):
+    def __init__(self, dim: int = 8, n_codes: int | None = None, commitment_weight: float = 0.25):
         super().__init__()
         self.dim = dim
-        self.n_codes = n_codes
+        self.n_codes = 2**dim if n_codes is None else n_codes
         self.commitment_weight = commitment_weight
 
     def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -119,7 +120,7 @@ class SpectrumCodec(nn.Module):
             self.enc_blocks.append(nn.Sequential(ConvNeXtBlock1d(w), ConvNeXtBlock1d(w), ConvNeXtBlock1d(w)))
             ch = w
         self.to_latent = nn.Conv1d(ch, latent_dim, 1)
-        self.quant = LFQuantizer(latent_dim, n_codes=1024, commitment_weight=commitment_weight)
+        self.quant = LFQuantizer(latent_dim, commitment_weight=commitment_weight)
 
         self.from_latent = nn.Conv1d(latent_dim, ch, 1)
         self.dec_blocks = nn.ModuleList()
@@ -186,6 +187,7 @@ class SpectrumCodec(nn.Module):
         *,
         lambda_phys: float = 0.0,
         lambda_entropy: float = 0.0,
+        use_batch_entropy: bool = False,
     ) -> dict:
         """x: arcsinh (B, 2, L); loss on flux channel (+ optional physical / entropy terms)."""
         x = self._resize(x)
@@ -202,7 +204,10 @@ class SpectrumCodec(nn.Module):
 
         ent_loss = torch.zeros((), device=x.device, dtype=x.dtype)
         if lambda_entropy > 0:
-            ent_loss = latent_index_entropy_penalty(indices)
+            if use_batch_entropy:
+                ent_loss = batch_codebook_entropy_loss(indices, n_bins=self.quant.n_codes)
+            else:
+                ent_loss = latent_index_entropy_penalty(indices, n_bins=self.quant.n_codes)
 
         total = recon_loss + q_loss + lambda_phys * phys_loss + lambda_entropy * ent_loss
         recon_phys = denormalize_spectrum_output(recon, denorm)[:, 0]

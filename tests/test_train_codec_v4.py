@@ -10,6 +10,28 @@ import train_codec as tc  # noqa: E402
 def test_infer_codec_version():
     assert tc.infer_codec_version("codec_v4_main", None) == "v4"
     assert tc.infer_codec_version("codec_v3", None) == "v3"
+    assert tc.infer_codec_version("codec_v5a_antollapse", None) == "v5a"
+    assert tc.infer_codec_version("codec_v5b_main", None) == "v5"
+
+
+def test_apply_version_defaults_v5a():
+    args = tc.argparse.Namespace(
+        codec_version="v5a",
+        steps=5000,
+        batch_size=16,
+        lr=3e-4,
+        checkpoint_metric="median",
+        healpix_holdout_frac=0.0,
+        val_every=0,
+        lr_schedule="constant",
+        lambda_phys_ramp_steps=0,
+        warmup_steps=0,
+        min_code_usage_fraction=0.0,
+        weight_decay=0.0,
+    )
+    tc.apply_version_defaults(args)
+    assert args.checkpoint_metric == "val_std_ratio_per_spec_median"
+    assert args.min_code_usage_fraction == 0.3
 
 
 def test_apply_version_defaults():
@@ -23,6 +45,7 @@ def test_apply_version_defaults():
         val_every=0,
         lr_schedule="constant",
         lambda_phys_ramp_steps=0,
+        warmup_steps=0,
     )
     tc.apply_version_defaults(args)
     assert args.steps == 20_000

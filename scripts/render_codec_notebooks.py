@@ -378,6 +378,42 @@ for run_name, ckpt_path in CHECKPOINTS.items():
     )
     cells.append(
         _md(
+            "## Held-out val healpix (optional)\n\n"
+            "Training tile (healpix 0) is usually **in-train** for `dr1_1k_scratch` seed 42. "
+            "Download one **val** healpix from the same split for fair comparison to W&B."
+        )
+    )
+    cells.append(
+        _code(
+            r"""from desifm.data.dr1_stream import load_manifest, val_healpix_ids
+
+REF_MANIFEST = REPO / "data" / "manifests" / "dr1_1k_scratch.jsonl"
+VAL_MANIFEST = REPO / "data" / "manifests" / "val_eval_dr1.jsonl"
+VAL_HEALPIX: list[int] = []
+
+if REF_MANIFEST.is_file():
+    ref_recs = load_manifest(REF_MANIFEST)
+    VAL_HEALPIX = val_healpix_ids(ref_recs, holdout=0.05, seed=42)[:3]
+    print("val healpix (seed 42, 5% holdout, first 3):", VAL_HEALPIX)
+else:
+    VAL_HEALPIX = [2, 7, 25]
+    print("reference manifest missing; using fallback val healpix:", VAL_HEALPIX)
+
+if VAL_HEALPIX:
+    from desifm.data.public_dr1 import ensure_dr1_tiles_local, tiles_for_healpix
+
+    ref_recs = load_manifest(REF_MANIFEST) if REF_MANIFEST.is_file() else None
+    val_tiles = tiles_for_healpix(VAL_HEALPIX[:1], records=ref_recs)
+    if not val_tiles:
+        print("no val tile found on public portal for", VAL_HEALPIX[:1])
+    else:
+        ensure_dr1_tiles_local(DATA_ROOT, VAL_MANIFEST, val_tiles)
+    val_recs = load_manifest(VAL_MANIFEST)
+    print("val tile:", val_recs[0].get("healpix") if val_recs else "none")"""
+        )
+    )
+    cells.append(
+        _md(
             "## Evaluation batch\n\n"
             "Training metrics use a **padded collated batch**. "
             "Plots below use the **stitched coadd** (real λ, flux, ivar, mask) from "
@@ -457,6 +493,66 @@ print("eval models:", {k: v[1] for k, v in MODELS.items()})"""
     )
     cells.append(
         _md(
+            "## Codebook usage audit (Tier 1 gate)\n\n"
+            "**Pass:** `usage_fraction` > 0.30 (≥77 / 256 codes for 8-bit LFQ). "
+            "If `n_unique` < 30, reconstructions will look like a flat template."
+        )
+    )
+    cells.append(
+        _code(
+            r"""from desifm.training.codec_eval import audit_code_usage
+
+CODE_USAGE_GATE = 0.30
+MIN_UNIQUE_WARN = 30
+
+audit_rows = []
+for run_name, (model, style, _color, label) in MODELS.items():
+    if style == "codec_v2_linear":
+        print(f"{label}: skip (linear codec, no LFQ audit)")
+        continue
+    try:
+        stats = audit_code_usage(
+            model,
+            batch,
+            style,
+            device,
+            lambda_entropy=0.5,
+            use_batch_entropy=True,
+        )
+    except Exception as exc:
+        print(f"{label}: audit failed:", exc)
+        continue
+    usage = float(stats["usage_fraction"])
+    passed = usage >= CODE_USAGE_GATE
+    warn = int(stats["n_unique"]) < MIN_UNIQUE_WARN
+    audit_rows.append((label, stats))
+    flag = "PASS" if passed else "FAIL"
+    print(
+        f"{label:16s}  unique={stats['n_unique']:3d}/{stats['n_codes']}  "
+        f"usage={usage*100:5.1f}%  ent_pen={stats['entropy_penalty']:.3f}  "
+        f"batch_ent={stats.get('batch_entropy_penalty', 0):.3f}  [{flag}]"
+        + ("  ** code-collapsed **" if warn else "")
+    )
+    if stats.get("top_codes"):
+        print("    top codes:", stats["top_codes"][:5])
+
+if audit_rows:
+    labels = [r[0] for r in audit_rows]
+    usages = [r[1]["usage_fraction"] for r in audit_rows]
+    fig, ax = plt.subplots(figsize=(max(4, len(labels) * 1.2), 3))
+    colors = ["mediumseagreen" if u >= CODE_USAGE_GATE else "indianred" for u in usages]
+    ax.bar(labels, usages, color=colors)
+    ax.axhline(CODE_USAGE_GATE, color="k", ls="--", lw=1, label=f"gate {CODE_USAGE_GATE:.0%}")
+    ax.set_ylabel("code usage fraction")
+    ax.set_title("LFQ code usage on eval batch")
+    ax.legend()
+    plt.xticks(rotation=25, ha="right")
+    plt.tight_layout()
+    plt.show()"""
+        )
+    )
+    cells.append(
+        _md(
             "## Scalar metrics (padded batch)\n\n"
             "These match **training** (collated, padded minibatch). "
             "They can disagree with the per-spectrum plots below. Lower `recon_loss` is better (Huber in arcsinh space)."
@@ -477,16 +573,20 @@ for name, a, b, c in rows:
     cells.append(
         _md(
             "## Per-spectrum collapse check\n\n"
-            "Training logs `val/std_ratio` by pooling **all good pixels in the validation "
-            "minibatch** (std across the batch tensor). That can look healthier than this "
-            "table, which measures **within each spectrum** — the same view as the flux plots.\n\n"
-            "**Tier 1 gate:** `std_ratio` > 0.5 on good pixels (`RESEARCH_LOG.md`). "
-            "Values well below 0.5 mean a flat reconstruction (mode collapse)."
+            "**Tier 1 gate:** within-spectrum `std_ratio` > 0.5 on good pixels.\n\n"
+            "| Column | Meaning |\n"
+            "|--------|--------|\n"
+            "| `*_nat` | Recon resampled to native λ (plot path) |\n"
+            "| `v4_gr` | v4 on **8704 grid** (same as training / W&B val forward) |\n"
+            "| `pooled` | All spectra × pixels in minibatch (W&B `val/std_ratio`) |\n\n"
+            "**Note:** `train_eval_dr1.jsonl` is usually **healpix 0**, which is in the "
+            "**training** 95% on `dr1_1k_scratch` (holdout seed 42). W&B `val/std_ratio≈0.94` "
+            "is on ~50 other val healpix with batch pooling — not comparable to per-spec on hp 0."
         )
     )
     cells.append(
         _code(
-            r"""from desifm.training.codec_loss import flux_std_ratio
+            r"""from desifm.training.codec_loss import flux_std_ratio, flux_std_ratio_per_sample
 
 COLLAPSE_GATE = 0.5
 
@@ -497,8 +597,7 @@ def rms_numpy(true_np, recon_np, mask_np):
     return float(np.sqrt(np.mean(d * d)))
 
 
-def per_spec_std_ratio(model, style, spec: dict) -> tuple[float, float, float]:
-    # Within-spectrum std(recon)/std(coadd) on good pixels + RMS + arcsinh recon_loss.
+def per_spec_std_ratio_native(model, style, spec: dict) -> tuple[float, float, float]:
     fwd = forward_physical_from_spec(model, spec, style, device)
     rec = fwd["flux_recon_native"]
     flux_t = torch.from_numpy(np.asarray(spec["flux"], dtype=np.float32)).unsqueeze(0)
@@ -509,15 +608,26 @@ def per_spec_std_ratio(model, style, spec: dict) -> tuple[float, float, float]:
 
 
 model_labels = [(run_name, label) for run_name, (_, _, _, label) in MODELS.items()]
+
+# Per-row ratios on codec grid (training / W&B val forward path)
+grid_by_label: dict[str, list[float]] = {}
+for run_name, (model, style, _, label) in MODELS.items():
+    out = forward_physical(model, batch, style)
+    grid_by_label[label] = flux_std_ratio_per_sample(
+        out["flux_recon"], out["flux_true"], batch["mask"].to(device)
+    ).cpu().tolist()
+
 hdr = f"{'idx':>3s} {'z':>7s} {'hp':>4s} {'row':>4s}"
 for _, label in model_labels:
-    short = label.replace("codec_", "").replace(" tier1", " t1")[:10]
-    hdr += f" {short + '_ratio':>11s}"
+    short = label.replace("codec_", "").replace(" tier1", " t1")[:6]
+    hdr += f" {short + '_nat':>9s}"
+hdr += f" {'v4_gr':>7s}"
 print(hdr)
 print("-" * len(hdr))
 
-per_model_ratios: dict[str, list[float]] = {label: [] for _, label in model_labels}
-n_collapsed: dict[str, int] = {label: 0 for _, label in model_labels}
+per_model_nat: dict[str, list[float]] = {label: [] for _, label in model_labels}
+n_collapsed_nat: dict[str, int] = {label: 0 for _, label in model_labels}
+v4_label = next((lbl for rn, lbl in model_labels if "v4" in rn or "tier1" in lbl), None)
 
 for idx, spec in enumerate(raw_specs):
     z = float(spec["z"])
@@ -526,31 +636,40 @@ for idx, spec in enumerate(raw_specs):
     line = f"{idx:3d} {z:7.4f} {str(hp):>4s} {str(row):>4s}"
     for run_name, label in model_labels:
         model, style, _, _ = MODELS[run_name]
-        ratio, _rms, _loss = per_spec_std_ratio(model, style, spec)
-        per_model_ratios[label].append(ratio)
+        ratio, _rms, _loss = per_spec_std_ratio_native(model, style, spec)
+        per_model_nat[label].append(ratio)
         if ratio < COLLAPSE_GATE:
-            n_collapsed[label] += 1
+            n_collapsed_nat[label] += 1
         flag = "!" if ratio < COLLAPSE_GATE else " "
-        line += f" {ratio:10.3f}{flag}"
+        line += f" {ratio:8.3f}{flag}"
+    if v4_label is not None:
+        g = grid_by_label[v4_label][idx]
+        line += f" {g:6.3f}{'!' if g < COLLAPSE_GATE else ' '}"
     print(line)
 
 print()
 print(f"Gate: std_ratio > {COLLAPSE_GATE}  (! = collapsed)")
 for _, label in model_labels:
-    vals = np.asarray(per_model_ratios[label], dtype=np.float64)
+    nat = np.asarray(per_model_nat[label], dtype=np.float64)
     print(
-        f"  {label:16s}  mean={vals.mean():.3f}  median={np.median(vals):.3f}  "
-        f"min={vals.min():.3f}  collapsed={n_collapsed[label]}/{len(vals)}"
+        f"  {label:16s}  native median={np.median(nat):.3f}  "
+        f"collapsed={n_collapsed_nat[label]}/{len(nat)}"
+    )
+if v4_label is not None:
+    gr = np.asarray(grid_by_label[v4_label], dtype=np.float64)
+    print(
+        f"  {v4_label:16s}  grid median={np.median(gr):.3f}  "
+        f"(training-path; still << W&B pooled if spectra differ in level)"
     )
 
-print("\nBatch-pooled std_ratio (same aggregation as W&B val/std_ratio on this minibatch):")
+print("\nBatch-pooled std_ratio (W&B val/std_ratio aggregation on this minibatch):")
 for run_name, (model, style, _c, label) in MODELS.items():
     out = forward_physical(model, batch, style)
     pooled = float(
         flux_std_ratio(out["flux_recon"], out["flux_true"], batch["mask"].to(device)).item()
     )
-    flag = "  <- can exceed per-spec median when spectra differ in level" if pooled > COLLAPSE_GATE else ""
-    print(f"  {label:16s}  pooled={pooled:.3f}{flag}")"""
+    note = "  <- misleading vs per-spec" if pooled > COLLAPSE_GATE else ""
+    print(f"  {label:16s}  pooled={pooled:.3f}{note}")"""
         )
     )
     cells.append(

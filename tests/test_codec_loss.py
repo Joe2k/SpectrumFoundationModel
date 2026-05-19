@@ -2,6 +2,8 @@ import torch
 from desifm.tokenization.spectrum_codec import SpectrumCodec
 from desifm.training.codec_input import prepare_codec_batch_v4
 from desifm.training.codec_loss import (
+    batch_codebook_entropy_loss,
+    code_usage_stats,
     flux_rms,
     flux_std_ratio,
     flux_std_ratio_per_sample,
@@ -20,6 +22,18 @@ def test_top_hat_smooth_preserves_shape():
 def test_entropy_penalty_collapsed_low():
     indices = torch.zeros(4, 32, dtype=torch.long)
     assert latent_index_entropy_penalty(indices).item() > 0.9
+
+
+def test_code_usage_stats_empty():
+    stats = code_usage_stats(torch.zeros(0, dtype=torch.long), n_codes=256)
+    assert stats["n_unique"] == 0
+    assert stats["usage_fraction"] == 0.0
+
+
+def test_batch_entropy_uniform_lower_than_collapsed():
+    collapsed = batch_codebook_entropy_loss(torch.zeros(64, dtype=torch.long), n_bins=256)
+    spread = batch_codebook_entropy_loss(torch.arange(256, dtype=torch.long).repeat(4), n_bins=256)
+    assert spread.item() < collapsed.item()
 
 
 def test_entropy_penalty_uniform_lower():
