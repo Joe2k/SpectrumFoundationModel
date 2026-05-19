@@ -54,3 +54,12 @@ def wrap_ddp(model: torch.nn.Module, device: torch.device, world_size: int) -> t
 
 def unwrap(model: torch.nn.Module) -> torch.nn.Module:
     return model.module if hasattr(model, "module") else model
+
+
+def all_ranks_agree_skip(local_skip: bool, device: torch.device) -> bool:
+    """True if any rank wants to skip the step (DDP-safe)."""
+    if not dist.is_initialized():
+        return local_skip
+    flag = torch.tensor([1.0 if local_skip else 0.0], device=device)
+    dist.all_reduce(flag, op=dist.ReduceOp.MAX)
+    return bool(flag.item() > 0)

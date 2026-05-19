@@ -28,6 +28,7 @@ from desifm.training.codec_input import (
 )
 from desifm.training.codec_loss import flux_rms, flux_std_ratio
 from desifm.training.distributed import (
+    all_ranks_agree_skip,
     cleanup_distributed,
     is_main_process,
     setup_distributed,
@@ -174,6 +175,7 @@ def main():
     p.add_argument("--wandb-mode", default="online", choices=["online", "offline", "disabled"])
     p.add_argument("--log-every", type=int, default=10)
     p.add_argument("--no-wandb-artifact", action="store_true")
+    p.add_argument("--num-workers", type=int, default=0, help="DataLoader workers per GPU")
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--synthetic", action="store_true")
     args = p.parse_args()
@@ -234,9 +236,10 @@ def main():
         batch_size=args.batch_size,
         shuffle=sampler is None,
         sampler=sampler,
-        num_workers=0,
+        num_workers=args.num_workers,
         collate_fn=collate_spectra,
         drop_last=True,
+        persistent_workers=args.num_workers > 0,
     )
 
     out_root = args.scratch_out or scratch_root() / "checkpoints"
@@ -264,13 +267,18 @@ def main():
             args.lambda_entropy,
             commitment,
         )
+        eff_batch = args.batch_size * world_size
         log.info(
-            "device=%s world_size=%d checkpoint_metric=%s val_every=%d holdout=%g",
+            "device=%s world_size=%d per_gpu_batch=%d effective_batch=%d "
+            "checkpoint_metric=%s val_every=%d holdout=%g num_workers=%d",
             device,
             world_size,
+            args.batch_size,
+            eff_batch,
             args.checkpoint_metric,
             args.val_every,
             args.healpix_holdout_frac,
+            args.num_workers,
         )
 
     model = SpectrumCodec(commitment_weight=commitment).to(device)
@@ -342,18 +350,18 @@ def main():
         )
         loss = out["loss"]
 
-        if not torch.isfinite(loss):
-            skipped += 1
+        loss_f = loss.item()
+        local_skip = not torch.isfinite(loss) or (args.max_loss > 0 and loss_f > args.max_loss)
+        if all_ranks_agree_skip(local_skip, device):
+            if main_proc:
+                skipped += 1
+                if step % args.log_every == 0:
+                    log.warning("skip step %d loss=%.4g (max_loss=%g)", step, loss_f, args.max_loss)
             step += 1
             continue
 
-        loss_f = loss.item()
-        if main_proc and tracker is not None and not tracker.update(loss_f):
-            skipped += 1
-            if step % args.log_every == 0:
-                log.warning("skip step %d loss=%.4g (max_loss=%g)", step, loss_f, args.max_loss)
-            step += 1
-            continue
+        if main_proc and tracker is not None:
+            tracker.update(loss_f)
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
