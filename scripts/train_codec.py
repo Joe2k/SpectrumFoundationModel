@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pretrain the spectrum codec. Supports DDP via torchrun."""
+"""Pretrain the spectrum codec (AION Tier-A preprocessing). Supports DDP via torchrun."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from desifm.data.dr1_stream import DR1StreamDataset, collate_spectra, load_manifest
 from desifm.data.synthetic import SyntheticSpectrumDataset
 from desifm.tokenization.spectrum_codec import SpectrumCodec
-from desifm.training.codec_input import prepare_codec_input
+from desifm.training.codec_input import prepare_codec_batch
 from desifm.training.distributed import (
     cleanup_distributed,
     is_main_process,
@@ -55,16 +55,23 @@ def append_metrics(path: Path, record: dict) -> None:
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--manifest", type=Path, default=None)
-    p.add_argument("--run-name", default="codec_v1")
+    p.add_argument("--run-name", default="codec_v3")
     p.add_argument("--scratch-out", type=Path, default=None)
     p.add_argument("--steps", type=int, default=5000)
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--max-spectra", type=int, default=None)
     p.add_argument("--grad-clip", type=float, default=1.0)
+    p.add_argument("--max-loss", type=float, default=50.0, help="Skip steps with loss above this")
+    p.add_argument(
+        "--checkpoint-metric",
+        choices=["median", "mean"],
+        default="median",
+        help="Aggregate last log_every steps for best checkpoint",
+    )
     p.add_argument("--wandb-mode", default="online", choices=["online", "offline", "disabled"])
-    p.add_argument("--log-every", type=int, default=10, help="Log to stdout/jsonl/wandb every N steps")
-    p.add_argument("--no-wandb-artifact", action="store_true", help="Skip uploading best.pt to W&B")
+    p.add_argument("--log-every", type=int, default=10)
+    p.add_argument("--no-wandb-artifact", action="store_true")
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--synthetic", action="store_true")
     args = p.parse_args()
@@ -103,17 +110,16 @@ def main():
     best_ckpt = run_dir / "best.pt"
     artifact_state: dict[str, str | None] = {"qualified": None}
     artifact_name = f"{args.run_name}-codec-best".replace("/", "_")
-    tracker = LossTracker(window=args.log_every) if main_proc else None
+    tracker = LossTracker(window=args.log_every, max_loss=args.max_loss) if main_proc else None
 
     if main_proc:
         n_params = sum(p.numel() for p in SpectrumCodec().parameters())
-        log.info("=== spectrum codec (tokenizer) training ===")
+        log.info("=== spectrum codec training (AION Tier-A input) ===")
         log.info("run_dir=%s", run_dir)
         log.info("manifest=%s", manifest_path or "(synthetic)")
         log.info("dataset_size=%d batch_size=%d steps=%d lr=%g", len(ds), args.batch_size, args.steps, args.lr)
-        log.info("device=%s world_size=%d local_rank=%d", device, world_size, local_rank)
-        log.info("model_params=%d log_every=%d wandb_mode=%s", n_params, args.log_every, args.wandb_mode)
-        log.info("input=median-normalized flux; best checkpoint uses %d-step avg loss", args.log_every)
+        log.info("device=%s world_size=%d", device, world_size)
+        log.info("norm=arcsinh+mask-aware checkpoint=%s max_loss=%g", args.checkpoint_metric, args.max_loss)
 
     model = SpectrumCodec().to(device)
     model = wrap_ddp(model, device, world_size)
@@ -122,9 +128,15 @@ def main():
     if main_proc and wb is not None:
         log.info("wandb run: %s", getattr(wb, "url", wb.name))
 
-    step, best_avg = 0, float("inf")
+    step, best_metric = 0, float("inf")
+    skipped = 0
     t0 = time.perf_counter()
     it = iter(loader)
+
+    def checkpoint_score() -> float:
+        assert tracker is not None
+        return tracker.window_median() if args.checkpoint_metric == "median" else tracker.window_mean()
+
     while step < args.steps:
         if sampler is not None:
             sampler.set_epoch(step)
@@ -135,10 +147,25 @@ def main():
             batch = next(it)
         if batch is None:
             continue
-        flux, ivar = batch["flux"].to(device), batch["ivar"].to(device)
-        x = prepare_codec_input(flux, ivar)
-        out = unwrap(model)(x)
+
+        batch_d = {k: v.to(device) if torch.is_tensor(v) else v for k, v in batch.items()}
+        x, denorm, mask = prepare_codec_batch(batch_d)
+        out = unwrap(model)(x, denorm, mask)
         loss = out["loss"]
+
+        if not torch.isfinite(loss):
+            skipped += 1
+            step += 1
+            continue
+
+        loss_f = loss.item()
+        if main_proc and not tracker.update(loss_f):
+            skipped += 1
+            if step % args.log_every == 0:
+                log.warning("skip step %d loss=%.4g (max_loss=%g)", step, loss_f, args.max_loss)
+            step += 1
+            continue
+
         opt.zero_grad(set_to_none=True)
         loss.backward()
         if args.grad_clip > 0:
@@ -147,15 +174,11 @@ def main():
 
         if main_proc:
             assert tracker is not None
-            loss_f = loss.item()
-            recon_f = out["recon_loss"].item()
-            q_f = out["q_loss"].item()
-            tracker.update(loss_f)
             do_log = step % args.log_every == 0
-
             if do_log:
                 avg_f = tracker.window_mean()
-                ema_f = tracker.ema or loss_f
+                med_f = tracker.window_median()
+                score = checkpoint_score()
                 elapsed = time.perf_counter() - t0
                 sps = (step + 1) / max(elapsed, 1e-6)
                 append_metrics(
@@ -165,25 +188,25 @@ def main():
                         "step": step,
                         "loss_batch": loss_f,
                         "loss_avg": avg_f,
-                        "loss_ema": ema_f,
-                        "recon_loss": recon_f,
-                        "q_loss": q_f,
-                        "best_avg": min(best_avg, avg_f),
-                        "lr": opt.param_groups[0]["lr"],
+                        "loss_median": med_f,
+                        "recon_loss": out["recon_loss"].item(),
+                        "q_loss": out["q_loss"].item(),
+                        "best_metric": min(best_metric, score),
+                        "skipped": skipped,
                         "steps_per_sec": sps,
-                        "elapsed_sec": elapsed,
                     },
                 )
                 log.info(
-                    "step %d/%d batch=%.4f avg=%.4f ema=%.4f recon=%.4f q=%.4f best_avg=%.4f (%.2f step/s)",
+                    "step %d/%d batch=%.4f med=%.4f recon=%.4f q=%.4f best_%s=%.4f skip=%d (%.2f step/s)",
                     step,
                     args.steps,
                     loss_f,
-                    avg_f,
-                    ema_f,
-                    recon_f,
-                    q_f,
-                    min(best_avg, avg_f),
+                    med_f,
+                    out["recon_loss"].item(),
+                    out["q_loss"].item(),
+                    args.checkpoint_metric,
+                    min(best_metric, score),
+                    skipped,
                     sps,
                 )
                 log_metrics(
@@ -191,39 +214,43 @@ def main():
                     {
                         "train/loss_batch": loss_f,
                         "train/loss_avg": avg_f,
-                        "train/loss_ema": ema_f,
-                        "train/recon": recon_f,
-                        "train/q_loss": q_f,
-                        "train/best_avg": min(best_avg, avg_f),
+                        "train/loss_median": med_f,
+                        "train/recon": out["recon_loss"].item(),
+                        "train/q_loss": out["q_loss"].item(),
+                        "train/skipped": skipped,
                     },
                     step,
                 )
 
-                if avg_f < best_avg:
-                    best_avg = avg_f
+                if score < best_metric:
+                    best_metric = score
                     torch.save(
-                        {"model": unwrap(model).state_dict(), "step": step, "loss": best_avg, "loss_avg": best_avg},
+                        {
+                            "model": unwrap(model).state_dict(),
+                            "step": step,
+                            "loss": best_metric,
+                            "input_style": "aion_tier_a",
+                        },
                         best_ckpt,
                     )
-                    log.info("saved best checkpoint step=%d best_avg=%.4f -> %s", step, best_avg, best_ckpt)
+                    log.info("saved best step=%d %s=%.4f -> %s", step, args.checkpoint_metric, best_metric, best_ckpt)
                     if wb and not args.no_wandb_artifact:
-                        replace_best_artifact(wb, best_ckpt, artifact_name, step, best_avg, artifact_state)
+                        replace_best_artifact(wb, best_ckpt, artifact_name, step, best_metric, artifact_state)
 
         step += 1
 
     if main_proc:
         elapsed = time.perf_counter() - t0
         torch.save(
-            {"model": unwrap(model).state_dict(), "step": step, "loss": best_avg, "loss_avg": best_avg},
+            {"model": unwrap(model).state_dict(), "step": step, "loss": best_metric, "input_style": "aion_tier_a"},
             run_dir / "final.pt",
         )
         append_metrics(
             metrics_path,
-            {"kind": "summary", "steps": step, "best_avg": best_avg, "elapsed_sec": elapsed, "run_dir": str(run_dir)},
+            {"kind": "summary", "steps": step, "best_metric": best_metric, "skipped": skipped, "elapsed_sec": elapsed},
         )
         finish(wb)
-        log.info("=== done === best_avg=%.4f elapsed=%.1fs -> %s", best_avg, elapsed, run_dir)
-        log.info("checkpoints: %s %s", best_ckpt, run_dir / "final.pt")
+        log.info("=== done === best_%s=%.4f skipped=%d -> %s", args.checkpoint_metric, best_metric, skipped, run_dir)
 
     cleanup_distributed()
 

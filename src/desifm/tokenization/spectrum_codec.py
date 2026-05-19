@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from typing import Tuple
 
 import torch
@@ -10,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from desifm.constants import GRID_SIZE, N_LATENT_TOKENS
+from desifm.training.codec_input import aion_denormalize, masked_recon_loss
 
 
 class ChannelLayerNorm(nn.Module):
@@ -20,7 +20,6 @@ class ChannelLayerNorm(nn.Module):
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, C, L)
         mean = x.mean(dim=1, keepdim=True)
         var = x.var(dim=1, keepdim=True, unbiased=False)
         x = (x - mean) / torch.sqrt(var + self.eps)
@@ -73,7 +72,6 @@ class LFQuantizer(nn.Module):
         self.n_codes = n_codes
 
     def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # z: (B, dim, T)
         indices = self.encode(z)
         z_q = self.decode(indices)
         commit = F.mse_loss(z_q.detach(), z)
@@ -81,14 +79,13 @@ class LFQuantizer(nn.Module):
         return z_q, commit + 0.25 * codebook, indices
 
     def encode(self, z: torch.Tensor) -> torch.Tensor:
-        bits = (z > 0).long()  # (B, dim, T)
+        bits = (z > 0).long()
         powers = (2 ** torch.arange(self.dim, device=z.device)).view(1, self.dim, 1)
         return (bits * powers).sum(dim=1).long()
 
     def decode(self, indices: torch.Tensor) -> torch.Tensor:
-        B, T = indices.shape
         bits = ((indices.unsqueeze(1) >> torch.arange(self.dim, device=indices.device).view(1, self.dim, 1)) & 1).float()
-        return bits * 2 - 1  # {-1, +1}
+        return bits * 2 - 1
 
 
 class SpectrumCodec(nn.Module):
@@ -121,52 +118,77 @@ class SpectrumCodec(nn.Module):
         self.head = nn.ConvTranspose1d(ch, in_channels, kernel_size=4, stride=4)
 
     def _resize(self, x: torch.Tensor) -> torch.Tensor:
-        """Interpolate input spectra to the fixed grid."""
         if x.shape[-1] == self.grid_size:
             return x
         return F.interpolate(x, size=self.grid_size, mode="linear", align_corners=False)
 
-    def encode(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """x: (B, 2, L) -> indices (B, T_latent), log_norm (B,)"""
+    def _encode_latent(self, x: torch.Tensor) -> torch.Tensor:
         x = self._resize(x)
-        log_norm = torch.log10(x[:, 0].abs().median(dim=-1).values.clamp(min=1e-12))
         h = self.stem(x)
         for down, blocks in zip(self.downs, self.enc_blocks):
             h = down(h)
             h = blocks(h)
-        h = self.to_latent(h)
-        _, _, indices = self.quant(h)
-        if indices.shape[-1] < self.n_tokens:
-            pad = self.n_tokens - indices.shape[-1]
-            indices = F.pad(indices, (0, pad))
-        elif indices.shape[-1] > self.n_tokens:
-            indices = indices[:, : self.n_tokens]
-        return indices, log_norm
+        return self.to_latent(h)
 
-    def decode(self, indices: torch.Tensor, log_norm: torch.Tensor) -> torch.Tensor:
+    def _decode_latent(self, indices: torch.Tensor) -> torch.Tensor:
         z_q = self.quant.decode(indices)
         h = self.from_latent(z_q)
         for up, blocks in zip(self.ups, self.dec_blocks):
             h = up(h)
             h = blocks(h)
         out = self.head(h)
-        out = self._resize(out)
-        scale = (10**log_norm).view(-1, 1, 1)
-        return out * scale
+        return self._resize(out)
 
-    def forward(self, x: torch.Tensor) -> dict:
-        x = self._resize(x)
-        log_norm = torch.log10(x[:, 0].abs().median(dim=-1).values.clamp(min=1e-12))
-        h = self.stem(x)
-        for down, blocks in zip(self.downs, self.enc_blocks):
-            h = down(h)
-            h = blocks(h)
-        h = self.to_latent(h)
-        z_q, q_loss, indices = self.quant(h)
+    def _pad_indices(self, indices: torch.Tensor) -> torch.Tensor:
         if indices.shape[-1] < self.n_tokens:
             indices = F.pad(indices, (0, self.n_tokens - indices.shape[-1]))
         elif indices.shape[-1] > self.n_tokens:
             indices = indices[:, : self.n_tokens]
-        recon = self.decode(indices, log_norm)
-        recon_loss = F.mse_loss(recon[:, 0], x[:, 0], reduction="mean")
-        return {"recon": recon, "loss": recon_loss + q_loss, "indices": indices, "recon_loss": recon_loss, "q_loss": q_loss}
+        return indices
+
+    def encode(self, x: torch.Tensor, denorm: torch.Tensor | None = None) -> Tuple[torch.Tensor, torch.Tensor | None]:
+        """x: (B, 2, L) arcsinh-normalized. Returns indices and optional denorm passthrough."""
+        h = self._encode_latent(x)
+        _, _, indices = self.quant(h)
+        return self._pad_indices(indices), denorm
+
+    def decode(
+        self,
+        indices: torch.Tensor,
+        denorm: torch.Tensor,
+        *,
+        to_physical: bool = True,
+    ) -> torch.Tensor:
+        """Decode tokens to spectrum. Default: physical flux+istd (B, 2, L)."""
+        recon = self._decode_latent(indices)
+        if to_physical:
+            return aion_denormalize(recon, denorm)
+        return recon
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        denorm: torch.Tensor,
+        mask: torch.Tensor | None = None,
+    ) -> dict:
+        """x: arcsinh (B, 2, L); loss computed in arcsinh space on flux channel."""
+        x = self._resize(x)
+        h = self._encode_latent(x)
+        z_q, q_loss, indices = self.quant(h)
+        indices = self._pad_indices(indices)
+        recon = self._decode_latent(indices)
+        loss_mask = mask
+        if loss_mask is not None and loss_mask.shape[-1] != x.shape[-1]:
+            loss_mask = F.interpolate(
+                loss_mask.unsqueeze(1).float(),
+                size=x.shape[-1],
+                mode="nearest",
+            ).squeeze(1).bool()
+        recon_loss = masked_recon_loss(recon[:, 0], x[:, 0], loss_mask)
+        return {
+            "recon": recon,
+            "loss": recon_loss + q_loss,
+            "indices": indices,
+            "recon_loss": recon_loss,
+            "q_loss": q_loss,
+        }

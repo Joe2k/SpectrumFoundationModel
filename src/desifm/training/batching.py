@@ -9,7 +9,7 @@ import torch
 from desifm.constants import EOS, MASK, REDMASK, REDSHIFT_OFFSET, SOS, SPECTRUM_OFFSET
 from desifm.tokenization.redshift_codec import RedshiftCodec
 from desifm.tokenization.spectrum_codec import SpectrumCodec
-from desifm.training.codec_input import prepare_codec_input
+from desifm.training.codec_input import prepare_codec_batch
 
 
 Approach = Literal["a", "b"]
@@ -21,10 +21,10 @@ def tokenize_batch(
     z_codec: RedshiftCodec,
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    flux, ivar = batch["flux"].to(device), batch["ivar"].to(device)
-    x = prepare_codec_input(flux, ivar)
+    batch = {k: v.to(device) if torch.is_tensor(v) else v for k, v in batch.items()}
+    x, denorm, _ = prepare_codec_batch(batch)
     with torch.no_grad():
-        spec_idx, _ = codec.encode(x)
+        spec_idx, _ = codec.encode(x, denorm)
     z_idx = torch.tensor([z_codec.encode(float(z)) for z in batch["z"]], device=device, dtype=torch.long)
     return spec_idx, z_idx
 
