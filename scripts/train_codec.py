@@ -27,7 +27,7 @@ from desifm.training.distributed import (
     wrap_ddp,
 )
 from desifm.training.paths import require_scratch_manifest, scratch_root
-from desifm.training.wandb_log import finish, init_run, log_metrics
+from desifm.training.wandb_log import finish, init_run, log_metrics, replace_best_artifact
 
 
 def setup_logging(run_dir: Path) -> logging.Logger:
@@ -60,7 +60,8 @@ def main():
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--max-spectra", type=int, default=None)
     p.add_argument("--wandb-mode", default="online", choices=["online", "offline", "disabled"])
-    p.add_argument("--log-every", type=int, default=50, help="Log to stdout/jsonl every N steps")
+    p.add_argument("--log-every", type=int, default=10, help="Log to stdout/jsonl/wandb every N steps")
+    p.add_argument("--no-wandb-artifact", action="store_true", help="Skip uploading best.pt to W&B")
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--synthetic", action="store_true")
     args = p.parse_args()
@@ -71,7 +72,6 @@ def main():
     if args.smoke:
         args.steps, args.max_spectra, args.batch_size = 50, 100, 4
         args.synthetic = True
-        args.log_every = 10
 
     if args.synthetic:
         ds = SyntheticSpectrumDataset(n_spectra=args.max_spectra or 512, seed=42)
@@ -97,6 +97,9 @@ def main():
     run_dir = out_root / args.run_name
     log = setup_logging(run_dir) if main_proc else None
     metrics_path = run_dir / "metrics.jsonl"
+    best_ckpt = run_dir / "best.pt"
+    artifact_state: dict[str, str | None] = {"qualified": None}
+    artifact_name = f"{args.run_name}-codec-best".replace("/", "_")
 
     if main_proc:
         n_params = sum(p.numel() for p in SpectrumCodec().parameters())
@@ -107,6 +110,7 @@ def main():
         log.info("device=%s world_size=%d local_rank=%d", device, world_size, local_rank)
         log.info("model_params=%d log_every=%d wandb_mode=%s", n_params, args.log_every, args.wandb_mode)
         log.info("metrics_jsonl=%s train_log=%s", metrics_path, run_dir / "train.log")
+        log.info("note: logged loss is per-minibatch (one random batch); spikes are normal")
 
     model = SpectrumCodec().to(device)
     model = wrap_ddp(model, device, world_size)
@@ -140,21 +144,23 @@ def main():
             loss_f = loss.item()
             recon_f = out["recon_loss"].item()
             q_f = out["q_loss"].item()
-            metrics = {
-                "kind": "train",
-                "step": step,
-                "loss": loss_f,
-                "recon_loss": recon_f,
-                "q_loss": q_f,
-                "lr": opt.param_groups[0]["lr"],
-                "best_loss": min(best, loss_f),
-            }
-            if step % args.log_every == 0:
+            do_log = step % args.log_every == 0
+
+            if do_log:
                 elapsed = time.perf_counter() - t0
                 sps = (step + 1) / max(elapsed, 1e-6)
-                metrics["steps_per_sec"] = sps
-                metrics["elapsed_sec"] = elapsed
-                append_metrics(metrics_path, metrics)
+                record = {
+                    "kind": "train",
+                    "step": step,
+                    "loss": loss_f,
+                    "recon_loss": recon_f,
+                    "q_loss": q_f,
+                    "lr": opt.param_groups[0]["lr"],
+                    "best_loss": min(best, loss_f),
+                    "steps_per_sec": sps,
+                    "elapsed_sec": elapsed,
+                }
+                append_metrics(metrics_path, record)
                 log.info(
                     "step %d/%d loss=%.4f recon=%.4f q=%.4f best=%.4f (%.2f step/s)",
                     step,
@@ -165,29 +171,36 @@ def main():
                     min(best, loss_f),
                     sps,
                 )
-            if step % args.log_every == 0:
-                log_metrics(wb, {"train/loss": loss_f, "train/recon": recon_f, "train/q_loss": q_f}, step)
+                log_metrics(
+                    wb,
+                    {
+                        "train/loss": loss_f,
+                        "train/recon": recon_f,
+                        "train/q_loss": q_f,
+                        "train/best_loss": min(best, loss_f),
+                    },
+                    step,
+                )
+
             if loss_f < best:
                 best = loss_f
-                torch.save({"model": unwrap(model).state_dict(), "step": step, "loss": best}, run_dir / "best.pt")
-                if step % args.log_every == 0:
-                    log.info("saved best checkpoint step=%d loss=%.4f", step, best)
+                torch.save({"model": unwrap(model).state_dict(), "step": step, "loss": best}, best_ckpt)
+                log.info("saved best checkpoint step=%d loss=%.4f -> %s", step, best, best_ckpt)
+                if wb and not args.no_wandb_artifact:
+                    replace_best_artifact(wb, best_ckpt, artifact_name, step, best, artifact_state)
+
         step += 1
 
     if main_proc:
         elapsed = time.perf_counter() - t0
         torch.save({"model": unwrap(model).state_dict(), "step": step, "loss": best}, run_dir / "final.pt")
-        summary = {
-            "kind": "summary",
-            "steps": step,
-            "best_loss": best,
-            "elapsed_sec": elapsed,
-            "run_dir": str(run_dir),
-        }
-        append_metrics(metrics_path, summary)
+        append_metrics(
+            metrics_path,
+            {"kind": "summary", "steps": step, "best_loss": best, "elapsed_sec": elapsed, "run_dir": str(run_dir)},
+        )
         finish(wb)
         log.info("=== done === best_loss=%.4f elapsed=%.1fs -> %s", best, elapsed, run_dir)
-        log.info("checkpoints: %s %s", run_dir / "best.pt", run_dir / "final.pt")
+        log.info("checkpoints: %s %s", best_ckpt, run_dir / "final.pt")
 
     cleanup_distributed()
 
