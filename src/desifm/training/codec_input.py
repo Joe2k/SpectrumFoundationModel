@@ -1,11 +1,10 @@
-"""AION-style spectrum preprocessing for the codec (Tier A)."""
+"""Spectrum preprocessing and reconstruction loss for the codec."""
 
 from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
 
-# Defaults aligned with AION SpectrumCodec
 CLIP_IVAR = 100.0
 CLIP_FLUX: float | None = None
 INPUT_SCALING = 0.2
@@ -13,7 +12,7 @@ DENORM_MIN = 0.1
 NORM_MIN = 0.1
 
 
-def aion_normalize(
+def normalize_spectrum_input(
     flux: torch.Tensor,
     ivar: torch.Tensor,
     mask: torch.Tensor | None = None,
@@ -22,7 +21,7 @@ def aion_normalize(
     clip_flux: float | None = CLIP_FLUX,
     input_scaling: float = INPUT_SCALING,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Mask-aware norm, affine scaling, arcsinh compression.
+    """Prepare flux/ivar for the codec: clean, scale, compress.
 
     flux, ivar: (B, L)
     mask: (B, L) True = bad pixel (DESI mask convention)
@@ -54,13 +53,13 @@ def aion_normalize(
     return x, denorm
 
 
-def aion_denormalize(
+def denormalize_spectrum_output(
     x_arcsinh: torch.Tensor,
     denorm: torch.Tensor,
     *,
     input_scaling: float = INPUT_SCALING,
 ) -> torch.Tensor:
-    """Inverse of aion_normalize. x_arcsinh: (B, 2, L) -> physical (B, 2, L)."""
+    """Map codec output from arcsinh space back to physical flux and istd."""
     x = torch.sinh(x_arcsinh)
     flux = (x[:, 0] / input_scaling + 1.0) * denorm.unsqueeze(-1)
     istd = (x[:, 1] / input_scaling) * denorm.unsqueeze(-1)
@@ -74,7 +73,7 @@ def masked_recon_loss(
     *,
     huber_delta: float = 1.0,
 ) -> torch.Tensor:
-    """Reconstruction loss on flux channel (index 0) in arcsinh space."""
+    """Huber reconstruction loss on flux channel (index 0) in arcsinh space."""
     diff = pred - target
     loss = F.smooth_l1_loss(diff, torch.zeros_like(diff), beta=huber_delta, reduction="none")
     if mask is None:
@@ -84,12 +83,12 @@ def masked_recon_loss(
 
 
 def prepare_codec_batch(batch: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """Build codec input from a collated batch dict."""
+    """Build codec tensors from a collated batch dict."""
     flux, ivar = batch["flux"], batch["ivar"]
     mask = batch.get("mask")
-    x, denorm = aion_normalize(flux, ivar, mask)
+    x, denorm = normalize_spectrum_input(flux, ivar, mask)
     return x, denorm, mask
 
 
-# Backward-compatible alias
-prepare_codec_input = aion_normalize
+# Alias used by older call sites
+prepare_codec_input = normalize_spectrum_input

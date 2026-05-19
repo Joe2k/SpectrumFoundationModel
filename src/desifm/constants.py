@@ -16,6 +16,6 @@ VOCAB_SIZE = 2056
 N_SPECTRUM_CODES = 1024
 N_REDSHIFT_BINS = 256
 
-# Spectrum codec grid (AION-style fixed grid)
+# Spectrum codec fixed wavelength grid (8704 pixels)
 GRID_SIZE = 8704
 N_LATENT_TOKENS = 273

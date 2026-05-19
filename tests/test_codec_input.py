@@ -1,13 +1,18 @@
 import torch
-from desifm.training.codec_input import aion_denormalize, aion_normalize, masked_recon_loss, prepare_codec_batch
+from desifm.training.codec_input import (
+    denormalize_spectrum_output,
+    masked_recon_loss,
+    normalize_spectrum_input,
+    prepare_codec_batch,
+)
 
 
-def test_aion_roundtrip():
+def test_normalize_roundtrip():
     flux = torch.tensor([[10.0, 20.0, 30.0], [1.0, 2.0, 3.0]])
     ivar = torch.ones_like(flux) * 5.0
     mask = torch.zeros_like(flux, dtype=torch.bool)
-    x, denorm = aion_normalize(flux, ivar, mask)
-    back = aion_denormalize(x, denorm)
+    x, denorm = normalize_spectrum_input(flux, ivar, mask)
+    back = denormalize_spectrum_output(x, denorm)
     assert torch.allclose(back[:, 0], flux, rtol=0.05, atol=0.5)
 
 
@@ -15,7 +20,7 @@ def test_masked_pixels_excluded_from_norm():
     flux = torch.tensor([[100.0, 100.0, 1e6]])
     ivar = torch.ones_like(flux)
     mask = torch.tensor([[False, False, True]])
-    x, denorm = aion_normalize(flux, ivar, mask)
+    x, denorm = normalize_spectrum_input(flux, ivar, mask)
     assert denorm.item() < 200.0
 
 

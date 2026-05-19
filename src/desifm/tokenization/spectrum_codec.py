@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from desifm.constants import GRID_SIZE, N_LATENT_TOKENS
-from desifm.training.codec_input import aion_denormalize, masked_recon_loss
+from desifm.training.codec_input import denormalize_spectrum_output, masked_recon_loss
 
 
 class ChannelLayerNorm(nn.Module):
@@ -162,7 +162,7 @@ class SpectrumCodec(nn.Module):
         """Decode tokens to spectrum. Default: physical flux+istd (B, 2, L)."""
         recon = self._decode_latent(indices)
         if to_physical:
-            return aion_denormalize(recon, denorm)
+            return denormalize_spectrum_output(recon, denorm)
         return recon
 
     def forward(

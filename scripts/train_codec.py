@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pretrain the spectrum codec (AION Tier-A preprocessing). Supports DDP via torchrun."""
+"""Pretrain the spectrum codec. Supports DDP via torchrun."""
 
 from __future__ import annotations
 
@@ -114,7 +114,7 @@ def main():
 
     if main_proc:
         n_params = sum(p.numel() for p in SpectrumCodec().parameters())
-        log.info("=== spectrum codec training (AION Tier-A input) ===")
+        log.info("=== spectrum codec training (mask-aware arcsinh input) ===")
         log.info("run_dir=%s", run_dir)
         log.info("manifest=%s", manifest_path or "(synthetic)")
         log.info("dataset_size=%d batch_size=%d steps=%d lr=%g", len(ds), args.batch_size, args.steps, args.lr)
@@ -229,7 +229,7 @@ def main():
                             "model": unwrap(model).state_dict(),
                             "step": step,
                             "loss": best_metric,
-                            "input_style": "aion_tier_a",
+                            "input_style": "mask_arcsinh_v3",
                         },
                         best_ckpt,
                     )
@@ -242,7 +242,7 @@ def main():
     if main_proc:
         elapsed = time.perf_counter() - t0
         torch.save(
-            {"model": unwrap(model).state_dict(), "step": step, "loss": best_metric, "input_style": "aion_tier_a"},
+            {"model": unwrap(model).state_dict(), "step": step, "loss": best_metric, "input_style": "mask_arcsinh_v3"},
             run_dir / "final.pt",
         )
         append_metrics(

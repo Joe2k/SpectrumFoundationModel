@@ -27,9 +27,9 @@ python scripts/stage_data.py \
   --dst-manifest $NERSC_SCRATCH_ROOT/manifests/dr1_200_scratch.jsonl
 ```
 
-## Train codec (1 GPU, Tier-A / codec_v3)
+## Train codec (1 GPU, codec_v3)
 
-Uses AION-style preprocessing (mask-aware norm, arcsinh, Huber recon loss).
+Uses mask-aware flux normalization, arcsinh compression, and Huber recon loss.
 Default manifest: **dr1_1k_scratch.jsonl** (1k healpix).
 
 ```bash
@@ -48,7 +48,7 @@ python scripts/train_codec.py \
 #   $NERSC_SCRATCH_ROOT/deepsrch/checkpoints/codec_v3/metrics.jsonl
 ```
 
-**Note:** `codec_v2` checkpoints used median-only norm; retrain for `codec_v3` (incompatible input pipeline).
+**Note:** `codec_v2` checkpoints used a simpler median norm; retrain for `codec_v3` (incompatible input pipeline).
 
 ## Train model (4 GPU DDP, Approach A then B)
 
