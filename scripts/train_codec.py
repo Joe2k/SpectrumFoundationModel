@@ -405,6 +405,9 @@ def main():
     artifact_name = f"{args.run_name}-codec-best".replace("/", "_")
     use_train_tracker = args.checkpoint_metric in ("median", "mean")
     tracker = LossTracker(window=args.log_every, max_loss=args.max_loss) if main_proc and use_train_tracker else None
+    delay_phys = bool(args.delay_lambda_phys_until_code_usage)
+    phys_unlocked = not delay_phys
+    phys_ramp_origin: int | None = 0 if phys_unlocked else None
 
     if main_proc:
         log.info("=== spectrum codec %s (%s) ===", args.codec_version, input_style)
@@ -460,9 +463,6 @@ def main():
 
     step, best_metric = 0, float("inf")
     skipped = 0
-    delay_phys = bool(args.delay_lambda_phys_until_code_usage)
-    phys_unlocked = not delay_phys
-    phys_ramp_origin: int | None = 0 if phys_unlocked else None
     t0 = time.perf_counter()
     it = iter(loader)
 
