@@ -1,0 +1,10 @@
+torch>=2.0
+numpy
+matplotlib
+tqdm
+astropy
+scipy
+wandb>=0.16
+python-dotenv>=1.0
+pyyaml>=6.0
+pytest>=7.0
