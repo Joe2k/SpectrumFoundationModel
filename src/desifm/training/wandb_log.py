@@ -36,18 +36,13 @@ def _configure_wandb_dirs(log_dir: Path) -> None:
     os.environ.setdefault("WANDB_CACHE_DIR", str(log_dir / "cache"))
     os.environ.setdefault("WANDB_CONFIG_DIR", str(log_dir / "config"))
     os.environ.setdefault("WANDB_INIT_TIMEOUT", "120")
-    # Skip the local wandb service process (often fails on Perlmutter)
-    os.environ.setdefault("WANDB_DISABLE_SERVICE", "true")
 
 
 def _wandb_init(mode: str, name: str, config: dict, log_dir: Path, group: str | None, tags: list[str] | None):
     import wandb
 
-    settings = wandb.Settings(
-        mode=mode,
-        _disable_service=True,
-        start_method="thread",
-    )
+    # Avoid deprecated Settings fields (_disable_service, start_method) that break
+    # recent wandb pydantic validation on NERSC.
     return wandb.init(
         project=WANDB_PROJECT,
         name=name,
@@ -55,7 +50,7 @@ def _wandb_init(mode: str, name: str, config: dict, log_dir: Path, group: str | 
         dir=str(log_dir),
         group=group,
         tags=tags or ["final-2026"],
-        settings=settings,
+        mode=mode,
     )
 
 

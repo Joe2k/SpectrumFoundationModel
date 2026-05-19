@@ -7,7 +7,18 @@ from pathlib import Path
 
 
 def scratch_root() -> Path:
-    return Path(os.environ.get("NERSC_SCRATCH_ROOT", os.environ.get("SCRATCH", "/tmp"))) / "deepsrch"
+    """Return deepsrch workspace root on SCRATCH.
+
+    ``NERSC_SCRATCH_ROOT`` is often already ``$SCRATCH/deepsrch`` (manifests live there).
+    Do not append ``deepsrch`` again in that case.
+    """
+    root = Path(os.environ.get("NERSC_SCRATCH_ROOT", os.environ.get("SCRATCH", "/tmp")))
+    if (root / "manifests").is_dir() or (root / "checkpoints").is_dir():
+        return root
+    nested = root / "deepsrch"
+    if nested.is_dir():
+        return nested
+    return nested
 
 
 def require_scratch_manifest(path: Path) -> Path:

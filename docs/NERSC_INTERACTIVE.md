@@ -10,7 +10,7 @@ mkdir -p $NERSC_SCRATCH_ROOT/{manifests,dr1_staged,checkpoints,wandb,logs}
 export WANDB_API_KEY=...
 export WANDB_PROJECT=desi-fm-2026
 export WANDB_DIR=$NERSC_SCRATCH_ROOT/wandb
-export WANDB_DISABLE_SERVICE=true
+# Do not set WANDB_DISABLE_SERVICE — breaks wandb init on recent versions.
 
 # If online init fails on compute nodes (ServicePollForTokenError), use offline:
 #   --wandb-mode offline

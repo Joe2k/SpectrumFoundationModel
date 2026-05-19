@@ -1,10 +1,20 @@
 import os
-import pytest
-from pathlib import Path
-from desifm.training.paths import require_scratch_manifest, scratch_root
+
+from desifm.training.paths import scratch_root
 
 
-def test_scratch_manifest_policy():
-    with pytest.raises(ValueError):
-        require_scratch_manifest(Path("/tmp/dr1.jsonl"))
-    require_scratch_manifest(Path("/tmp/dr1_scratch.jsonl"))
+def test_scratch_root_when_nersc_root_is_deepsrch(tmp_path, monkeypatch):
+    deepsrch = tmp_path / "deepsrch"
+    (deepsrch / "manifests").mkdir(parents=True)
+    monkeypatch.setenv("NERSC_SCRATCH_ROOT", str(deepsrch))
+    monkeypatch.delenv("SCRATCH", raising=False)
+    assert scratch_root() == deepsrch
+
+
+def test_scratch_root_when_scratch_is_parent(tmp_path, monkeypatch):
+    scratch = tmp_path / "pscratch"
+    deepsrch = scratch / "deepsrch"
+    (deepsrch / "manifests").mkdir(parents=True)
+    monkeypatch.setenv("SCRATCH", str(scratch))
+    monkeypatch.delenv("NERSC_SCRATCH_ROOT", raising=False)
+    assert scratch_root() == deepsrch
