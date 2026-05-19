@@ -35,14 +35,31 @@ python scripts/stage_data.py \
   --dst-manifest $NERSC_SCRATCH_ROOT/manifests/dr1_200_scratch.jsonl
 ```
 
-## Train codec (1 GPU, codec_v3)
+## Train codec (1 GPU)
 
-Uses mask-aware flux normalization, arcsinh compression, and Huber recon loss.
-Default manifest: **dr1_1k_scratch.jsonl** (1k healpix).
+Default manifest: **dr1_1k_scratch.jsonl** (1k healpix). Stage to SCRATCH first for I/O.
+
+### codec_v4 (recommended)
+
+Dual loss (arcsinh + physical flux), 5% healpix holdout, checkpoint on **val/rms_flux**.
 
 ```bash
-salloc -A deepsrch_g -C gpu -q interactive -t 02:00:00 --nodes=1 --gpus=1 --cpus-per-task=32
+salloc -A deepsrch_g -C gpu -q interactive -t 04:00:00 --nodes=1 --gpus=1 --cpus-per-task=32
 pip install -e .
+python scripts/train_codec.py \
+  --manifest $NERSC_SCRATCH_ROOT/manifests/dr1_1k_scratch.jsonl \
+  --run-name codec_v4 \
+  --codec-version v4 \
+  --wandb-mode online
+```
+
+Defaults with `--run-name codec_v4`: 20k steps, batch 32, lr 1e-4, warmup 1k, `λ_phys=0.5`, `λ_ent=0.1`, val every 500 steps.
+
+### codec_v3 (legacy)
+
+Mask-aware arcsinh + Huber; checkpoint on train loss median.
+
+```bash
 python scripts/train_codec.py \
   --manifest $NERSC_SCRATCH_ROOT/manifests/dr1_1k_scratch.jsonl \
   --run-name codec_v3 \

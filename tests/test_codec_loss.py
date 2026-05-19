@@ -1,0 +1,50 @@
+import torch
+from desifm.tokenization.spectrum_codec import SpectrumCodec
+from desifm.training.codec_input import prepare_codec_batch_v4
+from desifm.training.codec_loss import (
+    flux_rms,
+    flux_std_ratio,
+    latent_index_entropy_penalty,
+    physical_flux_loss,
+    top_hat_smooth_flux,
+)
+
+
+def test_top_hat_smooth_preserves_shape():
+    flux = torch.randn(2, 64)
+    out = top_hat_smooth_flux(flux, 5)
+    assert out.shape == flux.shape
+
+
+def test_entropy_penalty_collapsed_low():
+    indices = torch.zeros(4, 32, dtype=torch.long)
+    assert latent_index_entropy_penalty(indices).item() > 0.9
+
+
+def test_entropy_penalty_uniform_lower():
+    idx = torch.arange(256, dtype=torch.long).repeat(4, 8)
+    collapsed = latent_index_entropy_penalty(torch.zeros(4, 32, dtype=torch.long))
+    spread = latent_index_entropy_penalty(idx)
+    assert spread.item() < collapsed.item()
+
+
+def test_physical_flux_loss_positive():
+    flux = torch.rand(2, 128) + 0.5
+    ivar = torch.ones(2, 128)
+    mask = torch.zeros(2, 128, dtype=torch.bool)
+    batch = {"flux": flux, "ivar": ivar, "mask": mask}
+    x, denorm, m = prepare_codec_batch_v4(batch)
+    model = SpectrumCodec(commitment_weight=0.05)
+    out = model(x, denorm, m, lambda_phys=0.5, lambda_entropy=0.1)
+    assert out["phys_loss"].item() >= 0
+    assert out["entropy_loss"].item() >= 0
+    assert out["loss"].item() > out["recon_loss"].item()
+
+
+def test_flux_metrics():
+    target = torch.sin(torch.linspace(0, 10, 100)).unsqueeze(0)
+    pred = target + 0.1 * torch.randn_like(target)
+    mask = torch.zeros(1, 100, dtype=torch.bool)
+    assert flux_rms(pred, target, mask).item() > 0
+    ratio = flux_std_ratio(pred, target, mask).item()
+    assert 0.5 < ratio < 1.5

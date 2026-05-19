@@ -10,6 +10,11 @@ import torch.nn.functional as F
 
 from desifm.constants import GRID_SIZE, N_LATENT_TOKENS
 from desifm.training.codec_input import denormalize_spectrum_output, masked_recon_loss
+from desifm.training.codec_loss import (
+    align_mask_to_length,
+    latent_index_entropy_penalty,
+    physical_flux_loss,
+)
 
 
 class ChannelLayerNorm(nn.Module):
@@ -66,17 +71,18 @@ class Upsample(nn.Module):
 class LFQuantizer(nn.Module):
     """Lookup-free quantizer: each dim in {-1, +1}, index = binary code."""
 
-    def __init__(self, dim: int = 8, n_codes: int = 256):
+    def __init__(self, dim: int = 8, n_codes: int = 256, commitment_weight: float = 0.25):
         super().__init__()
         self.dim = dim
         self.n_codes = n_codes
+        self.commitment_weight = commitment_weight
 
     def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         indices = self.encode(z)
         z_q = self.decode(indices)
         commit = F.mse_loss(z_q.detach(), z)
         codebook = F.mse_loss(z_q, z.detach())
-        return z_q, commit + 0.25 * codebook, indices
+        return z_q, commit + self.commitment_weight * codebook, indices
 
     def encode(self, z: torch.Tensor) -> torch.Tensor:
         bits = (z > 0).long()
@@ -91,7 +97,14 @@ class LFQuantizer(nn.Module):
 class SpectrumCodec(nn.Module):
     """Encode flux+ivar to discrete spectrum tokens; decode back to flux."""
 
-    def __init__(self, in_channels: int = 2, latent_dim: int = 8, widths: Tuple[int, ...] = (96, 192, 384, 512)):
+    def __init__(
+        self,
+        in_channels: int = 2,
+        latent_dim: int = 8,
+        widths: Tuple[int, ...] = (96, 192, 384, 512),
+        *,
+        commitment_weight: float = 0.25,
+    ):
         super().__init__()
         self.grid_size = GRID_SIZE
         self.n_tokens = N_LATENT_TOKENS
@@ -106,7 +119,7 @@ class SpectrumCodec(nn.Module):
             self.enc_blocks.append(nn.Sequential(ConvNeXtBlock1d(w), ConvNeXtBlock1d(w), ConvNeXtBlock1d(w)))
             ch = w
         self.to_latent = nn.Conv1d(ch, latent_dim, 1)
-        self.quant = LFQuantizer(latent_dim, n_codes=1024)
+        self.quant = LFQuantizer(latent_dim, n_codes=1024, commitment_weight=commitment_weight)
 
         self.from_latent = nn.Conv1d(latent_dim, ch, 1)
         self.dec_blocks = nn.ModuleList()
@@ -170,25 +183,38 @@ class SpectrumCodec(nn.Module):
         x: torch.Tensor,
         denorm: torch.Tensor,
         mask: torch.Tensor | None = None,
+        *,
+        lambda_phys: float = 0.0,
+        lambda_entropy: float = 0.0,
     ) -> dict:
-        """x: arcsinh (B, 2, L); loss computed in arcsinh space on flux channel."""
+        """x: arcsinh (B, 2, L); loss on flux channel (+ optional physical / entropy terms)."""
         x = self._resize(x)
         h = self._encode_latent(x)
         z_q, q_loss, indices = self.quant(h)
         indices = self._pad_indices(indices)
         recon = self._decode_latent(indices)
-        loss_mask = mask
-        if loss_mask is not None and loss_mask.shape[-1] != x.shape[-1]:
-            loss_mask = F.interpolate(
-                loss_mask.unsqueeze(1).float(),
-                size=x.shape[-1],
-                mode="nearest",
-            ).squeeze(1).bool()
+        loss_mask = align_mask_to_length(mask, x.shape[-1])
         recon_loss = masked_recon_loss(recon[:, 0], x[:, 0], loss_mask)
+
+        phys_loss = torch.zeros((), device=x.device, dtype=x.dtype)
+        if lambda_phys > 0:
+            phys_loss = physical_flux_loss(recon, x, denorm, loss_mask)
+
+        ent_loss = torch.zeros((), device=x.device, dtype=x.dtype)
+        if lambda_entropy > 0:
+            ent_loss = latent_index_entropy_penalty(indices)
+
+        total = recon_loss + q_loss + lambda_phys * phys_loss + lambda_entropy * ent_loss
+        recon_phys = denormalize_spectrum_output(recon, denorm)[:, 0]
+        target_phys = denormalize_spectrum_output(x, denorm)[:, 0]
         return {
             "recon": recon,
-            "loss": recon_loss + q_loss,
+            "loss": total,
             "indices": indices,
             "recon_loss": recon_loss,
             "q_loss": q_loss,
+            "phys_loss": phys_loss,
+            "entropy_loss": ent_loss,
+            "recon_phys": recon_phys,
+            "target_phys": target_phys,
         }
