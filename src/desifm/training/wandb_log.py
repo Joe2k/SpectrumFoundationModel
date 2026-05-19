@@ -28,6 +28,37 @@ def _load_project_dotenv() -> bool:
     return False
 
 
+def _configure_wandb_dirs(log_dir: Path) -> None:
+    """Use SCRATCH-local dirs; avoids wandb service failures on compute nodes."""
+    log_dir = Path(log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("WANDB_DIR", str(log_dir))
+    os.environ.setdefault("WANDB_CACHE_DIR", str(log_dir / "cache"))
+    os.environ.setdefault("WANDB_CONFIG_DIR", str(log_dir / "config"))
+    os.environ.setdefault("WANDB_INIT_TIMEOUT", "120")
+    # Skip the local wandb service process (often fails on Perlmutter)
+    os.environ.setdefault("WANDB_DISABLE_SERVICE", "true")
+
+
+def _wandb_init(mode: str, name: str, config: dict, log_dir: Path, group: str | None, tags: list[str] | None):
+    import wandb
+
+    settings = wandb.Settings(
+        mode=mode,
+        _disable_service=True,
+        start_method="thread",
+    )
+    return wandb.init(
+        project=WANDB_PROJECT,
+        name=name,
+        config=config,
+        dir=str(log_dir),
+        group=group,
+        tags=tags or ["final-2026"],
+        settings=settings,
+    )
+
+
 def init_run(
     mode: str,
     name: str,
@@ -40,6 +71,7 @@ def init_run(
         return None
     had_env_file = _load_project_dotenv()
     api_key = os.environ.get("WANDB_API_KEY")
+    requested = mode
     if mode == "online" and not api_key:
         print(
             "[wandb] WANDB_API_KEY not set — falling back to offline. "
@@ -51,21 +83,36 @@ def init_run(
         mode = "offline"
     elif mode == "online" and api_key:
         src = str(_project_root() / ".env") if had_env_file and (_project_root() / ".env").is_file() else "environment"
-        print(f"[wandb] API key loaded from {src}; mode=online project={WANDB_PROJECT}", flush=True)
-    os.environ["WANDB_MODE"] = mode
+        print(f"[wandb] API key loaded from {src}; trying mode=online project={WANDB_PROJECT}", flush=True)
     try:
         import wandb
     except ImportError:
         return None
-    Path(dir).mkdir(parents=True, exist_ok=True)
-    return wandb.init(
-        project=WANDB_PROJECT,
-        name=name,
-        config=config,
-        dir=str(dir),
-        group=group,
-        tags=tags or ["final-2026"],
-    )
+
+    log_dir = Path(dir)
+    _configure_wandb_dirs(log_dir)
+
+    try:
+        run = _wandb_init(mode, name, config, log_dir, group, tags)
+        print(f"[wandb] started mode={mode} dir={log_dir}", flush=True)
+        return run
+    except Exception as exc:
+        if mode == "offline":
+            print(f"[wandb] init failed ({exc}); continuing without W&B", flush=True)
+            return None
+        print(
+            f"[wandb] online init failed ({exc}); falling back to offline. "
+            f"Sync later: wandb sync {log_dir}",
+            flush=True,
+        )
+        os.environ["WANDB_MODE"] = "offline"
+        try:
+            run = _wandb_init("offline", name, config, log_dir, group, tags)
+            print(f"[wandb] offline run dir={log_dir} (requested {requested})", flush=True)
+            return run
+        except Exception as exc2:
+            print(f"[wandb] offline init also failed ({exc2}); continuing without W&B", flush=True)
+            return None
 
 
 def log_metrics(run, metrics: dict[str, Any], step: int) -> None:

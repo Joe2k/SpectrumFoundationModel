@@ -4,9 +4,15 @@
 export NERSC_SCRATCH_ROOT=$SCRATCH/deepsrch
 mkdir -p $NERSC_SCRATCH_ROOT/{manifests,dr1_staged,checkpoints,wandb,logs}
 
-# W&B (`.env` is gitignored — not on NERSC after clone)
-export WANDB_API_KEY=...   # or: wandb login
+# W&B (`.env` is gitignored — create on NERSC or export manually)
+export WANDB_API_KEY=...
 export WANDB_PROJECT=desi-fm-2026
+export WANDB_DIR=$NERSC_SCRATCH_ROOT/wandb
+export WANDB_DISABLE_SERVICE=true
+
+# If online init fails on compute nodes (ServicePollForTokenError), use offline:
+#   --wandb-mode offline
+# then from a login node: wandb sync $NERSC_SCRATCH_ROOT/deepsrch/checkpoints/codec_v3/wandb
 ```
 
 ## Reuse staged manifests (if present)
@@ -42,6 +48,7 @@ python scripts/train_codec.py \
   --batch-size 16 \
   --checkpoint-metric median \
   --wandb-mode online
+# or: --wandb-mode offline   # if ServicePollForTokenError on compute node
 
 # Logs:
 #   $NERSC_SCRATCH_ROOT/deepsrch/checkpoints/codec_v3/train.log
