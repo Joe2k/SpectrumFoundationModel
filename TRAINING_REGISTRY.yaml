@@ -1,1 +1,19 @@
-runs: []
+# Training run registry — desi-fm-2026
+# Entity: jjayaseelan-university-of-san-francisco
+
+runs:
+  - run_name: codec_v2
+    wandb_id: nv7py9b1
+    wandb_url: https://wandb.ai/jjayaseelan-university-of-san-francisco/desi-fm-2026/runs/nv7py9b1
+    phase: phase2-codec
+    state: running
+    manifest: dr1_1k_scratch.jsonl
+    notes: median-normalized flux, avg-loss checkpoints, log_every=10
+
+  - run_name: codec_v1
+    wandb_id: efvc5599
+    wandb_url: https://wandb.ai/jjayaseelan-university-of-san-francisco/desi-fm-2026/runs/efvc5599
+    phase: phase2-codec
+    state: killed
+    manifest: dr1_1k_scratch.jsonl
+    notes: abandoned — raw-flux loss spikes; superseded by codec_v2
