@@ -132,41 +132,38 @@ def replace_best_artifact(
     loss: float,
     state: dict[str, str | None],
 ) -> None:
-    """Upload best.pt to W&B, deleting the previous best artifact for this run."""
+    """Upload best.pt to W&B; alias 'best' moves to the new version, then drop the old one."""
     if run is None:
         return
     checkpoint_path = Path(checkpoint_path)
     if not checkpoint_path.is_file():
         return
+    if os.environ.get("WANDB_MODE") == "offline":
+        return
     try:
         import wandb
 
-        api = wandb.Api()
         old_qualified = state.get("qualified")
-        if old_qualified:
-            try:
-                api.artifact(old_qualified).delete()
-            except Exception as exc:
-                print(f"[wandb] could not delete prior artifact {old_qualified}: {exc}", flush=True)
-
         art = wandb.Artifact(
             name=artifact_name,
             type="model",
             metadata={"step": step, "loss": float(loss)},
         )
-        if os.environ.get("WANDB_MODE") == "offline":
-            print("[wandb] offline mode — skipping artifact upload", flush=True)
-            return
-
         art.add_file(str(checkpoint_path), name="best.pt")
         run.log_artifact(art, aliases=["best"])
-        art.wait()  # required before version / qualified_name are available
+        art.wait()
         qualified = getattr(art, "qualified_name", None) or (
             f"{run.entity}/{run.project}/{art.name}:v{art.version}"
         )
         state["qualified"] = qualified
         run.log({"train/best_loss": loss, "checkpoint/step": step}, step=step)
         print(f"[wandb] uploaded best artifact {qualified} (step={step} loss={loss:.4f})", flush=True)
+
+        if old_qualified and old_qualified != qualified:
+            try:
+                wandb.Api().artifact(old_qualified).delete()
+            except Exception:
+                pass  # alias may still point at old version briefly; safe to leave extra versions
     except Exception as exc:
         print(f"[wandb] artifact upload failed: {exc}", flush=True)
 
