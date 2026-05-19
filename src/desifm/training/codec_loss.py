@@ -62,12 +62,26 @@ def latent_index_entropy_penalty(indices: torch.Tensor, n_bins: int = 256) -> to
     return (1.0 - entropy / max_ent).clamp(min=0.0, max=1.0)
 
 
+def _align_flux_metrics_inputs(
+    pred_flux: torch.Tensor,
+    target_flux: torch.Tensor,
+    mask: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """Match lengths for metrics (codec grid vs native padded batch)."""
+    L = min(int(pred_flux.shape[-1]), int(target_flux.shape[-1]))
+    pred_flux = pred_flux[..., :L]
+    target_flux = target_flux[..., :L]
+    mask = align_mask_to_length(mask, L)
+    return pred_flux, target_flux, mask
+
+
 def flux_rms(
     pred_flux: torch.Tensor,
     target_flux: torch.Tensor,
     mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """RMS error on good pixels; pred/target (B, L)."""
+    pred_flux, target_flux, mask = _align_flux_metrics_inputs(pred_flux, target_flux, mask)
     if mask is None:
         good = torch.ones_like(pred_flux, dtype=torch.bool)
     else:
@@ -84,6 +98,7 @@ def flux_std_ratio(
     mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """std(pred) / std(target) on good pixels — collapse detector."""
+    pred_flux, target_flux, mask = _align_flux_metrics_inputs(pred_flux, target_flux, mask)
     if mask is None:
         good = torch.ones_like(pred_flux, dtype=torch.bool)
     else:

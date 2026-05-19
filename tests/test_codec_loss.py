@@ -48,3 +48,12 @@ def test_flux_metrics():
     assert flux_rms(pred, target, mask).item() > 0
     ratio = flux_std_ratio(pred, target, mask).item()
     assert 0.5 < ratio < 1.5
+
+
+def test_flux_metrics_grid_vs_native_mask():
+    """Val batches: physical flux on 8704 grid, mask at native L."""
+    target = torch.randn(2, 8704)
+    pred = target + 0.05 * torch.randn_like(target)
+    mask = torch.zeros(2, 7781, dtype=torch.bool)
+    assert flux_rms(pred, target, mask).item() >= 0
+    assert flux_std_ratio(pred, target, mask).item() > 0
