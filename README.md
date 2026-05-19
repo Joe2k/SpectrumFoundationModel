@@ -20,6 +20,14 @@ pip install -e ".[dev]"
 pytest
 ```
 
+## Local smoke (no FITS)
+
+```bash
+bash scripts/run_smoke_local.sh
+```
+
+Uses `--synthetic` random spectra; checkpoints land in `checkpoints/smoke_local/`.
+
 ## NERSC (interactive, SCRATCH-only)
 
 See [docs/NERSC_INTERACTIVE.md](docs/NERSC_INTERACTIVE.md).

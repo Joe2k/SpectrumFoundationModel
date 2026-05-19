@@ -33,13 +33,22 @@ python scripts/train_codec.py \
   --run-name codec_v1 --wandb-mode online
 ```
 
-## Train model (4 GPU, Approach A then B)
+## Train model (4 GPU DDP, Approach A then B)
 
 ```bash
 python -m torch.distributed.run --nproc_per_node=4 scripts/train_model.py \
   --manifest $NERSC_SCRATCH_ROOT/manifests/dr1_10k_scratch.jsonl \
   --codec-ckpt $NERSC_SCRATCH_ROOT/checkpoints/codec_v1/best.pt \
-  --approach a --run-name p5a_a
+  --approach a --run-name p5_approach_a --wandb-mode online
+
+python -m torch.distributed.run --nproc_per_node=4 scripts/train_model.py \
+  --manifest $NERSC_SCRATCH_ROOT/manifests/dr1_10k_scratch.jsonl \
+  --codec-ckpt $NERSC_SCRATCH_ROOT/checkpoints/codec_v1/best.pt \
+  --approach b --run-name p5_approach_b --wandb-mode online
 ```
 
-(Use single-GPU `train_model.py` for smoke; DDP wrapper can be added when scaling.)
+## Local smoke (no FITS, synthetic data)
+
+```bash
+bash scripts/run_smoke_local.sh
+```
