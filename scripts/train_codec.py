@@ -192,6 +192,23 @@ def lambda_ramp_scale(step: int, ramp_steps: int) -> float:
     return min(max(step / ramp_steps, 0.0), 1.0)
 
 
+def effective_lambda_phys(
+    step: int,
+    target: float,
+    ramp_steps: int,
+    *,
+    delay_until_code_usage: bool,
+    phys_unlocked: bool,
+    phys_ramp_origin: int | None,
+) -> float:
+    """Training λ_phys: zero until code-usage gate passes, then linear ramp from unlock step."""
+    if delay_until_code_usage and not phys_unlocked:
+        return 0.0
+    origin = phys_ramp_origin if phys_ramp_origin is not None else 0
+    ramp = lambda_ramp_scale(max(step - origin, 0), ramp_steps)
+    return target * ramp
+
+
 def infer_codec_version(run_name: str, explicit: str | None) -> str:
     if explicit:
         return explicit
@@ -234,6 +251,8 @@ def apply_version_defaults(args: argparse.Namespace) -> None:
             args.checkpoint_metric = "val_std_ratio_per_spec_median"
         if args.min_code_usage_fraction == 0.0:
             args.min_code_usage_fraction = 0.3
+        if args.delay_lambda_phys_until_code_usage is None:
+            args.delay_lambda_phys_until_code_usage = True
     elif args.codec_version == "v5":
         _apply_tier1_training_defaults(args)
         if args.checkpoint_metric == "median":
@@ -242,6 +261,8 @@ def apply_version_defaults(args: argparse.Namespace) -> None:
             args.min_code_usage_fraction = 0.3
         if args.weight_decay == 0.0:
             args.weight_decay = 0.05
+        if args.delay_lambda_phys_until_code_usage is None:
+            args.delay_lambda_phys_until_code_usage = True
 
 
 def main():
@@ -292,6 +313,12 @@ def main():
         type=int,
         default=0,
         help="Linearly ramp λ_phys from 0 to target over N steps (v4 default 4000)",
+    )
+    p.add_argument(
+        "--delay-lambda-phys-until-code-usage",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Hold λ_phys at 0 until val code_usage_fraction ≥ min-code-usage-fraction (v5a/v5 default: on)",
     )
     p.add_argument("--lambda-entropy", type=float, default=0.0)
     p.add_argument("--commitment-weight", type=float, default=None, help="LFQ beta (v4 default 0.05)")
@@ -385,7 +412,7 @@ def main():
         log.info("manifest=%s", manifest_path or "(synthetic)")
         log.info(
             "dataset_size=%d batch_size=%d steps=%d lr=%g schedule=%s min_lr=%g warmup=%d "
-            "λ_phys=%g ramp=%d λ_ent=%g commit=%g",
+            "λ_phys=%g ramp=%d delay_phys_until_usage=%s (gate=%.2f) λ_ent=%g commit=%g",
             len(ds),
             args.batch_size,
             args.steps,
@@ -395,6 +422,8 @@ def main():
             args.warmup_steps,
             args.lambda_phys,
             args.lambda_phys_ramp_steps,
+            delay_phys,
+            args.min_code_usage_fraction,
             args.lambda_entropy,
             commitment,
         )
@@ -431,6 +460,9 @@ def main():
 
     step, best_metric = 0, float("inf")
     skipped = 0
+    delay_phys = bool(args.delay_lambda_phys_until_code_usage)
+    phys_unlocked = not delay_phys
+    phys_ramp_origin: int | None = 0 if phys_unlocked else None
     t0 = time.perf_counter()
     it = iter(loader)
 
@@ -501,8 +533,19 @@ def main():
 
         batch_d = {k: v.to(device) if torch.is_tensor(v) else v for k, v in batch.items()}
         x, denorm, mask = prepare_batch(batch_d, input_style)
-        ramp = lambda_ramp_scale(step, args.lambda_phys_ramp_steps)
-        lambda_phys_eff = args.lambda_phys * ramp
+        lambda_phys_eff = effective_lambda_phys(
+            step,
+            args.lambda_phys,
+            args.lambda_phys_ramp_steps,
+            delay_until_code_usage=delay_phys,
+            phys_unlocked=phys_unlocked,
+            phys_ramp_origin=phys_ramp_origin,
+        )
+        ramp = (
+            lambda_phys_eff / args.lambda_phys
+            if args.lambda_phys > 0
+            else 0.0
+        )
         out = unwrap(model)(
             x,
             denorm,
@@ -553,6 +596,7 @@ def main():
                     "lr": opt.param_groups[0]["lr"],
                     "lambda_phys_eff": lambda_phys_eff,
                     "lambda_ramp": ramp,
+                    "lambda_phys_unlocked": phys_unlocked,
                 }
                 if tracker:
                     rec["loss_avg"] = avg_f
@@ -580,6 +624,7 @@ def main():
                     "train/lr": opt.param_groups[0]["lr"],
                     "train/lambda_phys_eff": lambda_phys_eff,
                     "train/lambda_ramp": ramp,
+                    "train/lambda_phys_unlocked": float(phys_unlocked),
                 }
                 if tracker:
                     wb_payload["train/loss_avg"] = avg_f
@@ -597,16 +642,40 @@ def main():
                 and step > 0
                 and step % args.val_every == 0
             ):
+                val_lambda_phys = effective_lambda_phys(
+                    step,
+                    args.lambda_phys,
+                    args.lambda_phys_ramp_steps,
+                    delay_until_code_usage=delay_phys,
+                    phys_unlocked=phys_unlocked,
+                    phys_ramp_origin=phys_ramp_origin,
+                )
                 val_stats = run_validation(
                     unwrap(model),
                     val_loader,
                     device,
                     input_style,
                     codec_version=args.codec_version,
-                    lambda_phys=args.lambda_phys,
+                    lambda_phys=val_lambda_phys,
                     lambda_entropy=args.lambda_entropy,
                     max_batches=args.val_max_batches,
                 )
+                if (
+                    delay_phys
+                    and not phys_unlocked
+                    and val_stats["code_usage_fraction"] >= args.min_code_usage_fraction
+                ):
+                    phys_unlocked = True
+                    phys_ramp_origin = step
+                    log.info(
+                        "λ_phys unlocked at step %d (code_usage=%.3f ≥ %.3f); "
+                        "ramp %d steps to target %.3f",
+                        step,
+                        val_stats["code_usage_fraction"],
+                        args.min_code_usage_fraction,
+                        args.lambda_phys_ramp_steps,
+                        args.lambda_phys,
+                    )
                 append_metrics(metrics_path, {"kind": "val", "step": step, **val_stats})
                 log.info(
                     "val step=%d rms=%.4f recon=%.4f std_ratio=%.3f std_med=%.3f "
@@ -659,6 +728,12 @@ def main():
             {"kind": "summary", "steps": step, "best_metric": best_metric, "skipped": skipped, "elapsed_sec": elapsed},
         )
         finish(wb)
+        if delay_phys and not phys_unlocked:
+            log.warning(
+                "λ_phys never unlocked (code usage stayed below %.3f); "
+                "consider higher λ_ent or v5b architecture",
+                args.min_code_usage_fraction,
+            )
         log.info("=== done === best=%.4f skipped=%d -> %s", best_metric, skipped, run_dir)
 
     cleanup_distributed()

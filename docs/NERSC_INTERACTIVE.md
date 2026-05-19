@@ -96,7 +96,7 @@ Per-GPU batch 32 → **effective batch 128** across 4 GPUs. Checkpoints: `$NERSC
 
 ### codec_v5a (anti-collapse, v4 backbone)
 
-Same architecture as v4; FM-style **batch entropy**, stronger `λ_ent`, checkpoint on **per-spec** `std_ratio` median, skip save if code usage &lt; 30%.
+Same architecture as v4; FM-style **batch entropy**, stronger `λ_ent`, checkpoint on **per-spec** `std_ratio` median, skip save if code usage &lt; 30%. **`λ_phys` delayed** until code usage ≥ 30% (default for v5a).
 
 ```bash
 torchrun --standalone --nnodes=1 --nproc_per_node=4 scripts/train_codec.py \
@@ -112,6 +112,8 @@ torchrun --standalone --nnodes=1 --nproc_per_node=4 scripts/train_codec.py \
 
 `SpectrumCodecV5`: U-Net skips, cross-attention, `latent_dim=10`, physical flux MSE primary.
 
+**Default for v5a/v5:** `λ_phys` stays **0** until `val/code_usage_fraction ≥ 0.3`, then ramps over 4k steps (avoids phys-driven collapse). Disable with `--no-delay-lambda-phys-until-code-usage`.
+
 ```bash
 torchrun --standalone --nnodes=1 --nproc_per_node=4 scripts/train_codec.py \
   --manifest $NERSC_SCRATCH_ROOT/manifests/dr1_1k_scratch.jsonl \
@@ -122,7 +124,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node=4 scripts/train_codec.py \
   --wandb-mode online
 ```
 
-Watch W&B: `val/n_unique_codes`, `val/code_usage_fraction`, `val/std_ratio_per_spec_median`.
+Watch W&B: `val/n_unique_codes`, `val/code_usage_fraction`, `train/lambda_phys_unlocked`, `val/std_ratio_per_spec_median`. Log line `λ_phys unlocked at step …` when the gate passes.
 
 ### codec_v3 (legacy)
 
