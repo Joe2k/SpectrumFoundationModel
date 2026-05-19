@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from desifm.data.dr1_stream import DR1StreamDataset, collate_spectra, load_manifest
 from desifm.data.synthetic import SyntheticSpectrumDataset
 from desifm.tokenization.spectrum_codec import SpectrumCodec
+from desifm.training.codec_input import prepare_codec_input
 from desifm.training.distributed import (
     cleanup_distributed,
     is_main_process,
@@ -26,6 +27,7 @@ from desifm.training.distributed import (
     unwrap,
     wrap_ddp,
 )
+from desifm.training.loss_tracker import LossTracker
 from desifm.training.paths import require_scratch_manifest, scratch_root
 from desifm.training.wandb_log import finish, init_run, log_metrics, replace_best_artifact
 
@@ -59,6 +61,7 @@ def main():
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--max-spectra", type=int, default=None)
+    p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--wandb-mode", default="online", choices=["online", "offline", "disabled"])
     p.add_argument("--log-every", type=int, default=10, help="Log to stdout/jsonl/wandb every N steps")
     p.add_argument("--no-wandb-artifact", action="store_true", help="Skip uploading best.pt to W&B")
@@ -100,6 +103,7 @@ def main():
     best_ckpt = run_dir / "best.pt"
     artifact_state: dict[str, str | None] = {"qualified": None}
     artifact_name = f"{args.run_name}-codec-best".replace("/", "_")
+    tracker = LossTracker(window=args.log_every) if main_proc else None
 
     if main_proc:
         n_params = sum(p.numel() for p in SpectrumCodec().parameters())
@@ -109,8 +113,7 @@ def main():
         log.info("dataset_size=%d batch_size=%d steps=%d lr=%g", len(ds), args.batch_size, args.steps, args.lr)
         log.info("device=%s world_size=%d local_rank=%d", device, world_size, local_rank)
         log.info("model_params=%d log_every=%d wandb_mode=%s", n_params, args.log_every, args.wandb_mode)
-        log.info("metrics_jsonl=%s train_log=%s", metrics_path, run_dir / "train.log")
-        log.info("note: logged loss is per-minibatch (one random batch); spikes are normal")
+        log.info("input=median-normalized flux; best checkpoint uses %d-step avg loss", args.log_every)
 
     model = SpectrumCodec().to(device)
     model = wrap_ddp(model, device, world_size)
@@ -119,7 +122,7 @@ def main():
     if main_proc and wb is not None:
         log.info("wandb run: %s", getattr(wb, "url", wb.name))
 
-    step, best = 0, float("inf")
+    step, best_avg = 0, float("inf")
     t0 = time.perf_counter()
     it = iter(loader)
     while step < args.steps:
@@ -133,73 +136,93 @@ def main():
         if batch is None:
             continue
         flux, ivar = batch["flux"].to(device), batch["ivar"].to(device)
-        x = torch.stack([flux, torch.sqrt(ivar.clamp(min=1e-10))], dim=1)
+        x = prepare_codec_input(flux, ivar)
         out = unwrap(model)(x)
         loss = out["loss"]
         opt.zero_grad(set_to_none=True)
         loss.backward()
+        if args.grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(unwrap(model).parameters(), args.grad_clip)
         opt.step()
 
         if main_proc:
+            assert tracker is not None
             loss_f = loss.item()
             recon_f = out["recon_loss"].item()
             q_f = out["q_loss"].item()
+            tracker.update(loss_f)
             do_log = step % args.log_every == 0
 
             if do_log:
+                avg_f = tracker.window_mean()
+                ema_f = tracker.ema or loss_f
                 elapsed = time.perf_counter() - t0
                 sps = (step + 1) / max(elapsed, 1e-6)
-                record = {
-                    "kind": "train",
-                    "step": step,
-                    "loss": loss_f,
-                    "recon_loss": recon_f,
-                    "q_loss": q_f,
-                    "lr": opt.param_groups[0]["lr"],
-                    "best_loss": min(best, loss_f),
-                    "steps_per_sec": sps,
-                    "elapsed_sec": elapsed,
-                }
-                append_metrics(metrics_path, record)
+                append_metrics(
+                    metrics_path,
+                    {
+                        "kind": "train",
+                        "step": step,
+                        "loss_batch": loss_f,
+                        "loss_avg": avg_f,
+                        "loss_ema": ema_f,
+                        "recon_loss": recon_f,
+                        "q_loss": q_f,
+                        "best_avg": min(best_avg, avg_f),
+                        "lr": opt.param_groups[0]["lr"],
+                        "steps_per_sec": sps,
+                        "elapsed_sec": elapsed,
+                    },
+                )
                 log.info(
-                    "step %d/%d loss=%.4f recon=%.4f q=%.4f best=%.4f (%.2f step/s)",
+                    "step %d/%d batch=%.4f avg=%.4f ema=%.4f recon=%.4f q=%.4f best_avg=%.4f (%.2f step/s)",
                     step,
                     args.steps,
                     loss_f,
+                    avg_f,
+                    ema_f,
                     recon_f,
                     q_f,
-                    min(best, loss_f),
+                    min(best_avg, avg_f),
                     sps,
                 )
                 log_metrics(
                     wb,
                     {
-                        "train/loss": loss_f,
+                        "train/loss_batch": loss_f,
+                        "train/loss_avg": avg_f,
+                        "train/loss_ema": ema_f,
                         "train/recon": recon_f,
                         "train/q_loss": q_f,
-                        "train/best_loss": min(best, loss_f),
+                        "train/best_avg": min(best_avg, avg_f),
                     },
                     step,
                 )
 
-            if loss_f < best:
-                best = loss_f
-                torch.save({"model": unwrap(model).state_dict(), "step": step, "loss": best}, best_ckpt)
-                log.info("saved best checkpoint step=%d loss=%.4f -> %s", step, best, best_ckpt)
-                if wb and not args.no_wandb_artifact:
-                    replace_best_artifact(wb, best_ckpt, artifact_name, step, best, artifact_state)
+                if avg_f < best_avg:
+                    best_avg = avg_f
+                    torch.save(
+                        {"model": unwrap(model).state_dict(), "step": step, "loss": best_avg, "loss_avg": best_avg},
+                        best_ckpt,
+                    )
+                    log.info("saved best checkpoint step=%d best_avg=%.4f -> %s", step, best_avg, best_ckpt)
+                    if wb and not args.no_wandb_artifact:
+                        replace_best_artifact(wb, best_ckpt, artifact_name, step, best_avg, artifact_state)
 
         step += 1
 
     if main_proc:
         elapsed = time.perf_counter() - t0
-        torch.save({"model": unwrap(model).state_dict(), "step": step, "loss": best}, run_dir / "final.pt")
+        torch.save(
+            {"model": unwrap(model).state_dict(), "step": step, "loss": best_avg, "loss_avg": best_avg},
+            run_dir / "final.pt",
+        )
         append_metrics(
             metrics_path,
-            {"kind": "summary", "steps": step, "best_loss": best, "elapsed_sec": elapsed, "run_dir": str(run_dir)},
+            {"kind": "summary", "steps": step, "best_avg": best_avg, "elapsed_sec": elapsed, "run_dir": str(run_dir)},
         )
         finish(wb)
-        log.info("=== done === best_loss=%.4f elapsed=%.1fs -> %s", best, elapsed, run_dir)
+        log.info("=== done === best_avg=%.4f elapsed=%.1fs -> %s", best_avg, elapsed, run_dir)
         log.info("checkpoints: %s %s", best_ckpt, run_dir / "final.pt")
 
     cleanup_distributed()
