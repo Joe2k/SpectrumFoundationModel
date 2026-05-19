@@ -107,9 +107,16 @@ def replace_best_artifact(
             type="model",
             metadata={"step": step, "loss": float(loss)},
         )
+        if os.environ.get("WANDB_MODE") == "offline":
+            print("[wandb] offline mode — skipping artifact upload", flush=True)
+            return
+
         art.add_file(str(checkpoint_path), name="best.pt")
         run.log_artifact(art, aliases=["best"])
-        qualified = f"{run.entity}/{run.project}/{art.name}:v{art.version}"
+        art.wait()  # required before version / qualified_name are available
+        qualified = getattr(art, "qualified_name", None) or (
+            f"{run.entity}/{run.project}/{art.name}:v{art.version}"
+        )
         state["qualified"] = qualified
         run.log({"train/best_loss": loss, "checkpoint/step": step}, step=step)
         print(f"[wandb] uploaded best artifact {qualified} (step={step} loss={loss:.4f})", flush=True)
