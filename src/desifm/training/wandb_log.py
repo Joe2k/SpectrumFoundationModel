@@ -9,6 +9,25 @@ from typing import Any, Optional
 WANDB_PROJECT = "desi-fm-2026"
 
 
+def _project_root() -> Path:
+    """Repo root (parent of src/)."""
+    return Path(__file__).resolve().parents[3]
+
+
+def _load_project_dotenv() -> bool:
+    """Load .env from repo root. Returns True if file exists."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return False
+    env_path = _project_root() / ".env"
+    if env_path.is_file():
+        load_dotenv(env_path, override=False)
+        return True
+    load_dotenv(override=False)
+    return False
+
+
 def init_run(
     mode: str,
     name: str,
@@ -19,14 +38,20 @@ def init_run(
 ):
     if mode == "disabled":
         return None
-    try:
-        from dotenv import load_dotenv
-
-        load_dotenv()
-    except ImportError:
-        pass
-    if mode == "online" and not os.environ.get("WANDB_API_KEY"):
+    had_env_file = _load_project_dotenv()
+    api_key = os.environ.get("WANDB_API_KEY")
+    if mode == "online" and not api_key:
+        print(
+            "[wandb] WANDB_API_KEY not set — falling back to offline. "
+            "Add WANDB_API_KEY=... to .env at repo root, or run `wandb login`.",
+            flush=True,
+        )
+        if had_env_file:
+            print("[wandb] Found .env but WANDB_API_KEY is missing or empty.", flush=True)
         mode = "offline"
+    elif mode == "online" and api_key:
+        src = str(_project_root() / ".env") if had_env_file and (_project_root() / ".env").is_file() else "environment"
+        print(f"[wandb] API key loaded from {src}; mode=online project={WANDB_PROJECT}", flush=True)
     os.environ["WANDB_MODE"] = mode
     try:
         import wandb

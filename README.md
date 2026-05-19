@@ -32,7 +32,7 @@ Uses `--synthetic` random spectra; checkpoints land in `checkpoints/smoke_local/
 
 See [docs/NERSC_INTERACTIVE.md](docs/NERSC_INTERACTIVE.md).
 
-- W&B project: **`desi-fm-2026`**
+- W&B project: **`desi-fm-2026`** — put `WANDB_API_KEY=...` in `.env` at repo root (local only; not committed)
 - Train only on `*_scratch.jsonl` manifests
 - Logs: `RESEARCH_LOG.md`, `TRAINING_REGISTRY.yaml`
 
