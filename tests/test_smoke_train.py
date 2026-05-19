@@ -7,10 +7,10 @@ from desifm.training.batching import build_sequences, tokenize_batch
 
 
 class TinyCodec:
-    def encode(self, x):
+    def encode(self, x, denorm=None):
         B, _, L = x.shape
         T = 8
-        return torch.randint(0, 16, (B, T)), torch.zeros(B)
+        return torch.randint(0, 16, (B, T)), denorm
 
 
 def test_one_step_approach_a():
@@ -19,6 +19,7 @@ def test_one_step_approach_a():
     batch = {
         "flux": torch.rand(2, 64),
         "ivar": torch.ones(2, 64),
+        "mask": torch.zeros(2, 64, dtype=torch.bool),
         "z": torch.tensor([0.1, 0.5]),
     }
     device = torch.device("cpu")

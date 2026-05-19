@@ -12,8 +12,9 @@ def test_lfq_binary_codes():
 
 def test_codec_forward():
     m = SpectrumCodec(widths=(32, 64, 64, 64))
-    x = torch.randn(2, 2, 4000)
-    out = m(x)
+    x = torch.randn(2, 2, 4000) * 0.1
+    denorm = torch.ones(2) * 10.0
+    out = m(x, denorm)
     assert out["recon"].shape[0] == 2
     assert out["loss"].ndim == 0
     assert out["indices"].shape[1] == m.n_tokens

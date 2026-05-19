@@ -119,10 +119,33 @@ VQ (`q_loss`) negligible throughout; reconstruction (`recon`) drives loss.
 
 ---
 
+## 2026-05-19: codec_v3 Tier A (AION-style preprocessing)
+
+Implemented in `desifm.training.codec_input` + updated `SpectrumCodec` / `train_codec.py`:
+
+| Feature | Detail |
+|---------|--------|
+| Norm | Mask-aware mean flux → `log10` → `denorm`; `(flux/denorm - 1)×0.2`; **arcsinh** |
+| Sanitize | `nan_to_num`, ivar clip ≤ 100 |
+| Loss | Huber (smooth L1) on **arcsinh flux**, mask-weighted pixels |
+| Decode | `sinh` + inverse affine with per-spectrum `denorm` |
+| Stability | Skip steps with `loss > 50` or non-finite; **median** over 10 steps for `best.pt` |
+| Data | `mask` in DR1 dataset + collate (pad = masked) |
+| Default run | `codec_v3` on **`dr1_1k_scratch.jsonl`** |
+
+**Train on NERSC (1k healpix):**
+
+```bash
+python scripts/train_codec.py \
+  --manifest $NERSC_SCRATCH_ROOT/manifests/dr1_1k_scratch.jsonl \
+  --run-name codec_v3 --steps 5000 --wandb-mode online
+```
+
+`codec_v2` checkpoints are **not compatible** (different input pipeline). Use `codec_v2` for a quick FM baseline or retrain `codec_v3` for AION-aligned tokens.
+
 ### Next
 
-1. **Phase 5:** `train_model.py` with `--codec-ckpt .../codec_v2/best.pt` — Approach A then B (4× GPU DDP on `dr1_10k_scratch.jsonl` if staged)
-2. Optional: codec eval notebook (`03_phase_codec_eval.ipynb`) on held-out healpix
-3. Optional: retrain codec on `dr1_10k` if 1k tokenizer quality insufficient
+1. Train **`codec_v3`** on Perlmutter (`dr1_1k_scratch.jsonl`)
+2. **Phase 5:** `train_model.py --codec-ckpt .../codec_v3/best.pt` — Approach A then B
+3. Optional: Tier B (deeper encoder, LFQ dim 10) if recon still high
 4. Record transformer W&B run IDs in `TRAINING_REGISTRY.yaml`
-5. Code hardening: skip non-finite / clipped loss batches; robust EMA (future)

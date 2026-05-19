@@ -6,7 +6,7 @@ This codebase was rewritten cleanly for the final project. It is **not** a copy 
 
 ## Design
 
-- **Spectrum codec**: 1D ConvNeXt-style encoder/decoder + lookup-free quantization → 273 discrete tokens
+- **Spectrum codec**: ConvNeXt + LFQ; **AION Tier-A** input (mask-aware norm, arcsinh, Huber loss) → 273 tokens
 - **Redshift codec**: empirical CDF → Gaussian → uniform bins (256 levels)
 - **Transformer**: encoder-decoder with modality embeddings
 - **Approach A**: encoder sees `z`; auxiliary MLP on pooled encoder for joint redshift learning
