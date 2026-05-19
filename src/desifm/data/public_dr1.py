@@ -16,8 +16,13 @@ from typing import Sequence
 
 PUBLIC_DR1_BASE_DEFAULT = "https://data.desi.lbl.gov/public/dr1"
 
-# Verified tiles on the public server (main survey, dark time, group directory "0").
-# The notebook / CLI download **one tile by default** (minimal disk); use more slices from this list.
+# Same survey/program order as FoundationModel ``nersc/build_dr1_index.py`` (used for
+# ``dr1_1k_scratch.jsonl`` on NERSC). SV3 tiles are not on the public portal; discovery
+# skips missing URLs and returns the first available tiles in this order.
+TRAINING_WALK_SURVEYS: tuple[str, ...] = ("sv3", "main")
+TRAINING_WALK_PROGRAMS: tuple[str, ...] = ("bright", "dark")
+
+# Legacy convenience list (main/dark only). Prefer ``discover_public_training_tiles``.
 IRON_TILE_CATALOG: list[tuple[str, str, str, int]] = [
     ("main", "dark", "0", 0),
     ("main", "dark", "0", 1),
@@ -38,6 +43,82 @@ def iron_tile_rel_paths(survey: str, program: str, group: str, healpix: int) -> 
 def public_url(dr1_relative_path: str, *, public_base: str = PUBLIC_DR1_BASE_DEFAULT) -> str:
     rel = dr1_relative_path.lstrip("/")
     return f"{public_base.rstrip('/')}/{rel}"
+
+
+def _healpix_group_candidates(healpix: int) -> list[str]:
+    """Group directory names to try under ``.../healpix/<survey>/<program>/<group>/<hp>/``."""
+    hp = int(healpix)
+    if hp < 100:
+        return ["0"]
+    g = hp // 100
+    return list(dict.fromkeys([str(g), f"{g:03d}", "0"]))
+
+
+def tile_exists_on_public(
+    survey: str,
+    program: str,
+    group: str,
+    healpix: int,
+    *,
+    public_base: str = PUBLIC_DR1_BASE_DEFAULT,
+    timeout_seconds: float = 20.0,
+) -> bool:
+    """Return True if coadd FITS exists on the public DR1 portal (HTTP HEAD)."""
+    rel_coadd, _ = iron_tile_rel_paths(survey, program, group, healpix)
+    url = public_url(rel_coadd, public_base=public_base)
+    req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "desifm-local-dr1/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+            return int(getattr(resp, "status", 200)) == 200
+    except urllib.error.HTTPError as e:
+        return e.code == 200
+    except OSError:
+        return False
+
+
+def discover_public_training_tiles(
+    max_tiles: int = 1,
+    *,
+    surveys: Sequence[str] = TRAINING_WALK_SURVEYS,
+    programs: Sequence[str] = TRAINING_WALK_PROGRAMS,
+    max_healpix_scan: int = 64,
+    public_base: str = PUBLIC_DR1_BASE_DEFAULT,
+    timeout_seconds: float = 20.0,
+) -> list[tuple[str, str, str, int]]:
+    """First *max_tiles* healpix on the public portal in NERSC manifest walk order.
+
+    Walks ``surveys`` × ``programs`` (default sv3→main, bright→dark), then healpix
+    0, 1, … with group-dir probes matching the iron tree layout. Skips surveys/programs
+    not mirrored on ``data.desi.lbl.gov`` (e.g. sv3 today).
+    """
+    if max_tiles < 1:
+        raise ValueError("max_tiles must be >= 1")
+    found: list[tuple[str, str, str, int]] = []
+    for survey in surveys:
+        for program in programs:
+            for hp in range(max_healpix_scan):
+                for group in _healpix_group_candidates(hp):
+                    if not tile_exists_on_public(
+                        survey,
+                        program,
+                        group,
+                        hp,
+                        public_base=public_base,
+                        timeout_seconds=timeout_seconds,
+                    ):
+                        continue
+                    tile = (survey, program, group, hp)
+                    if tile not in found:
+                        found.append(tile)
+                    break
+                if len(found) >= max_tiles:
+                    return found
+    if not found:
+        raise RuntimeError(
+            "No DR1 iron tiles found on the public portal in training walk order. "
+            "Check network access to data.desi.lbl.gov."
+        )
+    return found
 
 
 def _download_file(url: str, dest: Path, *, timeout_seconds: float = 300.0) -> None:

@@ -12,7 +12,28 @@ runs:
     runtime_sec: 3763
     best_avg: 1.375
     checkpoint: deepsrch/checkpoints/codec_v2/best.pt
+    wandb_artifact: codec_v2-codec-best
     notes: production tokenizer; median-normalized flux, avg-loss checkpoints
+
+  - run_name: codec_v3
+    wandb_id: yqzndkc0
+    wandb_url: https://wandb.ai/jjayaseelan-university-of-san-francisco/desi-fm-2026/runs/yqzndkc0
+    phase: phase2-codec
+    state: running
+    manifest: dr1_1k_scratch.jsonl
+    wandb_artifact: codec_v3-codec-best
+    notes: Tier-A mask_arcsinh input; in progress on dr1_1k_scratch (May 2026)
+
+  - run_name: codec_v4
+    wandb_id: null
+    phase: phase2-codec
+    state: planned
+    manifest: dr1_1k_scratch.jsonl
+    wandb_artifact: codec_v4-codec-best
+    notes: >
+      Dual loss (arcsinh + physical flux), healpix holdout val, entropy penalty,
+      top-hat smoothing, commitment beta=0.05, checkpoint on val/rms_flux.
+      Train with scripts/train_codec.py --run-name codec_v4 (20k steps default).
 
   - run_name: codec_v1
     wandb_id: efvc5599

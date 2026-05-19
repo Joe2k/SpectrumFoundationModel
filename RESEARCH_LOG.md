@@ -133,6 +133,16 @@ Implemented in `desifm.training.codec_input` + updated `SpectrumCodec` / `train_
 | Data | `mask` in DR1 dataset + collate (pad = masked) |
 | Default run | `codec_v3` on **`dr1_1k_scratch.jsonl`** |
 
+### `codec_v3` — **running** (Tier A)
+
+| Field | Value |
+|-------|-------|
+| Run ID | `yqzndkc0` |
+| URL | https://wandb.ai/jjayaseelan-university-of-san-francisco/desi-fm-2026/runs/yqzndkc0 |
+| State | **running** (as of 2026-05-19) |
+| Manifest | `dr1_1k_scratch.jsonl` |
+| Group | `phase2-codec` |
+
 **Train on NERSC (1k healpix):**
 
 ```bash
@@ -143,9 +153,87 @@ python scripts/train_codec.py \
 
 `codec_v2` checkpoints are **not compatible** (different input pipeline). Use `codec_v2` for a quick FM baseline or retrain `codec_v3` for AION-aligned tokens.
 
-### Next
+### Next (superseded by v4 — see below)
 
-1. Train **`codec_v3`** on Perlmutter (`dr1_1k_scratch.jsonl`)
-2. **Phase 5:** `train_model.py --codec-ckpt .../codec_v3/best.pt` — Approach A then B
-3. Optional: Tier B (deeper encoder, LFQ dim 10) if recon still high
-4. Record transformer W&B run IDs in `TRAINING_REGISTRY.yaml`
+1. ~~Train **`codec_v3`**~~ — running; eval shows **physical collapse** despite low `train/recon`
+2. **Phase 5** should wait for **`codec_v4`** with held-out healpix + physical metrics
+3. Record transformer W&B run IDs in `TRAINING_REGISTRY.yaml`
+
+---
+
+## 2026-05-19: Local codec eval + training-tile download
+
+### Public DR1 for laptop eval
+
+| Piece | Detail |
+|-------|--------|
+| Discovery | `discover_public_training_tiles()` — same survey/program order as `nersc/build_dr1_index.py` |
+| Portal gap | **sv3** not on `data.desi.lbl.gov`; first available tile ≈ **`main/bright/0/0`** |
+| Manifest | `data/manifests/train_eval_dr1.jsonl` (1 healpix, coadd + redrock) |
+| Notebooks | `01_phase_data.ipynb`, `03_phase_codec_eval.ipynb` — self-contained download cells |
+| CLI | `python scripts/download_dr1_local.py --training-order` |
+
+### Eval findings (codec_v2 / codec_v3 on real coadd)
+
+| Check | Result |
+|-------|--------|
+| Stitched coadd | OK |
+| v3 input roundtrip | OK → preprocessing/denorm correct |
+| v2/v3 recon on real DR1 | **Flat** (decoder ≈ constant flux) |
+| `std(recon)/std(coadd)` | ~0.01–0.02 vs ~1.6 on `main/bright` tile |
+| v2 per-spec `recon_loss` | ~0.99 (consistent with `best_avg` ≈ 1.37) |
+| v3 `train/recon` ~0.03 | Arcsinh Huber — **misleading** vs physical plots |
+| Synthetic spectra | v2/v3 retain ~12–17% variance ratio — eval code OK, **OOD real DR1** fails |
+
+**Root causes:** (1) train manifest mostly **sv3** on NERSC vs local **main** tile; (2) loss allows **mean prediction** in normalized space; (3) v2 undertrained; (4) no **healpix holdout** or **physical RMS** checkpoint gate.
+
+### Helpers added
+
+- `desifm.training.codec_eval` — v2 legacy linear forward, per-spectrum eval, W&B download
+- `desifm.training.wandb_codec` — artifact + history helpers
+- `scripts/render_codec_notebooks.py` — regenerate `02` / `03`
+
+---
+
+## 2026-05-19: **codec_v4** plan (in progress)
+
+**Goal:** Spectrum tokenizer that reconstructs real DESI coadds on **held-out healpix**, not just low arcsinh loss.
+
+### Tier 1 (this implementation)
+
+| Feature | Detail |
+|---------|--------|
+| `input_style` | `mask_arcsinh_v4` (v3 norm + optional 5-pixel top-hat on flux) |
+| Loss | Arcsinh Huber + **physical flux Huber** (`λ_phys` default 0.5) |
+| VQ | Commitment **β=0.05**; **code-usage entropy** penalty (`λ_ent` default 0.1) |
+| Data split | `healpix_split` 5% val healpix (entire tiles) |
+| Checkpoint | Best on **val physical RMS** (not train arcsinh alone) |
+| Scale | Default **20k** steps, batch 32, lr 1e-4, warmup 1000 (NERSC) |
+| Eval | `val_every` logging: `val/rms_flux`, `val/recon_arcsinh`, `val/std_ratio`, `val/q_loss` |
+
+### Tier 2 (after Tier 1 gates)
+
+- U-Net skip connections + light decoder cross-attention (FoundationModel V2 recipe)
+- Scale manifest 2k–10k healpix; SCRATCH-staged I/O
+
+### Success gates (held-out healpix)
+
+- `val/std_ratio` > 0.5 (recon flux std / target std on good pixels)
+- `val/rms_flux` < 0.5 × median(σ) per spectrum (tune on val plots)
+- Code usage > 30% of 256 latent indices
+- Visual: emission/continuum visible in overlay (not flat line)
+
+### Train on NERSC
+
+```bash
+python scripts/train_codec.py \
+  --manifest $NERSC_SCRATCH_ROOT/manifests/dr1_1k_scratch.jsonl \
+  --run-name codec_v4 \
+  --steps 20000 \
+  --healpix-holdout-frac 0.05 \
+  --val-every 500 \
+  --lambda-phys 0.5 \
+  --lambda-entropy 0.1 \
+  --checkpoint-metric val_rms \
+  --wandb-mode online
+```
