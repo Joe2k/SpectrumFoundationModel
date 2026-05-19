@@ -3,6 +3,10 @@
 ```bash
 export NERSC_SCRATCH_ROOT=$SCRATCH/deepsrch
 mkdir -p $NERSC_SCRATCH_ROOT/{manifests,dr1_staged,checkpoints,wandb,logs}
+
+# W&B (`.env` is gitignored — not on NERSC after clone)
+export WANDB_API_KEY=...   # or: wandb login
+export WANDB_PROJECT=desi-fm-2026
 ```
 
 ## Reuse staged manifests (if present)
@@ -31,6 +35,10 @@ pip install -e .
 python scripts/train_codec.py \
   --manifest $NERSC_SCRATCH_ROOT/manifests/dr1_1k_scratch.jsonl \
   --run-name codec_v1 --wandb-mode online
+
+# Logs (stdout + files under run dir):
+#   $NERSC_SCRATCH_ROOT/deepsrch/checkpoints/codec_v1/train.log
+#   $NERSC_SCRATCH_ROOT/deepsrch/checkpoints/codec_v1/metrics.jsonl
 ```
 
 ## Train model (4 GPU DDP, Approach A then B)
