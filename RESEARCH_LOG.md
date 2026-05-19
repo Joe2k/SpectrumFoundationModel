@@ -26,7 +26,7 @@ W&B project: **desi-fm-2026** (`jjayaseelan-university-of-san-francisco/desi-fm-
 |--------|---------|
 | `train.log` + `metrics.jsonl` under run dir | Persistent logs on SCRATCH |
 | `--log-every 10` (default) | Frequent stdout + W&B metrics |
-| `replace_best_artifact()` | Upload `best.pt` to W&B; delete prior version |
+| `replace_best_artifact()` | Upload `best.pt` to W&B; delete prior version (`art.wait()`) |
 | Repo-root `.env` → `WANDB_API_KEY` | Online sync from laptop / NERSC `.env` |
 | `prepare_codec_input()` | Per-spectrum median normalization (stable loss scale) |
 | `LossTracker` (batch / avg / ema) | Readable metrics; checkpoint on **10-step avg** |
@@ -38,45 +38,66 @@ Raw-flux MSE scales with brightness; a single bright minibatch dominates `train/
 
 `codec_v2` uses normalized flux + avg-loss checkpoints; batch/avg losses stay O(0.01–10).
 
+### Why `train/loss_ema` looked high mid-run
+
+EMA uses every step’s batch loss (decay 0.98). Rare outlier batches (~step 180, ~4190) inject huge values; EMA decays slowly. **Ignore EMA for decisions**; use `train/best_avg`, `train/loss_batch`, and `train/recon`.
+
 ---
 
 ## W&B runs — spectrum codec (phase 2)
 
-### `codec_v2` (latest, **running**)
+### `codec_v2` — **finished** (production tokenizer)
 
 | Field | Value |
 |-------|-------|
 | Run ID | `nv7py9b1` |
 | URL | https://wandb.ai/jjayaseelan-university-of-san-francisco/desi-fm-2026/runs/nv7py9b1 |
-| State | running (as of 2026-05-18 fetch) |
+| State | **finished** |
 | Manifest | `dr1_1k_scratch.jsonl` |
 | Config | steps=5000, batch=16, lr=3e-4, log_every=10, grad_clip=1 |
+| Runtime | ~63 min (3763 s) |
+| Steps | 4990 |
 | Group | `phase2-codec` |
 
-**Summary metrics @ step 170** (from W&B):
+**Checkpoint (use for transformer):**
+
+```text
+$NERSC_SCRATCH_ROOT/deepsrch/checkpoints/codec_v2/best.pt
+```
+
+Saved when **10-step `loss_avg`** improved; final `best_avg` = **1.375** (@ step ~4770).
+
+**Final summary metrics (W&B @ step 4990):**
 
 | Metric | Value |
 |--------|-------|
-| `train/best_avg` | **1.665** |
-| `train/loss_avg` | 1.719 (last logged window) |
-| `train/loss_batch` | 1.758 |
-| `train/loss_ema` | 3.362 |
-| `train/recon` | 1.753 |
-| `train/q_loss` | 0.005 |
+| `train/best_avg` | **1.375** |
+| `train/loss_avg` | 1.81 |
+| `train/loss_batch` | 3.34 |
+| `train/loss_ema` | 2.47 |
+| `train/recon` | 3.34 |
+| `train/q_loss` | 4.0×10⁻⁵ |
 
-**Training curve (sampled, every ~10 steps):**
+**Training arc (`best_avg`):**
 
-| Step | loss_batch | loss_avg | best_avg | recon |
-|------|------------|----------|----------|-------|
-| 0 | 3.19 | 3.19 | 3.19 | 2.46 |
-| 30 | 1.17 | 2.11 | **2.11** | 1.13 |
-| 40 | 0.66 | **1.98** | **1.98** | 0.64 |
-| 80 | 2.34 | 1.67 | **1.67** | 2.32 |
-| 90 | 1.76 | 1.72 | 1.67 | 1.75 |
-| 120 | 1.35 | 9.31 | 1.67 | 1.33 |
-| 170 | 2.15 | 2.06 | 1.67 | 2.15 |
+| Phase | Step (approx) | best_avg |
+|-------|---------------|----------|
+| Warmup | 0–40 | 3.19 → 1.98 |
+| Early | 80–410 | 1.67 → 1.50 |
+| Mid | 1400–2090 | 1.45 → 1.44 |
+| Late | 4770 | **1.375** (final best) |
 
-`loss_avg` windows can spike when one hard batch enters the 10-step window; `best_avg` is monotonic and is the checkpoint criterion.
+VQ (`q_loss`) negligible throughout; reconstruction (`recon`) drives loss.
+
+**Outlier batches (did not update `best.pt`):**
+
+| Step | loss_batch | Notes |
+|------|------------|-------|
+| ~180 | batch ~2, **avg ~17M** | Bad row in 10-step window; EMA polluted for hundreds of steps |
+| ~4190 | **~2.2×10⁶** | Numerical blow-up (recon dominated); `best_avg` unchanged at 1.436 |
+| ~4770+ | batch ~1–2 | Normal; new best saved |
+
+**Verdict:** Training healthy. Normalized MSE ~1–3 typical; `best.pt` from avg-loss criterion is valid for phase 5.
 
 ### `codec_v1` (killed @ step 1000 — pre-normalization)
 
@@ -87,24 +108,21 @@ Raw-flux MSE scales with brightness; a single bright minibatch dominates `train/
 | State | killed |
 | Issue | Raw-flux MSE; `log_every=100`; single-batch `train/loss` |
 
-**Sampled history (shows spikes):**
-
 | Step | train/loss | train/recon |
 |------|------------|-------------|
 | 0 | 214.1 | 213.5 |
-| 200 | 18.6 | 18.6 |
-| 300 | **117.0** | 117.0 |
-| 600 | **467.2** | 467.2 |
-| 900 | 1.75 | 1.75 |
+| 300 | 117.0 | 117.0 |
+| 600 | 467.2 | 467.2 |
 | 1000 | 53.0 | 53.0 |
 
-Do **not** use `codec_v1` checkpoint for downstream transformer training; use `codec_v2` when complete.
+**Do not use** `codec_v1` for downstream training.
 
 ---
 
 ### Next
 
-1. Let `codec_v2` finish (5000 steps on `dr1_1k_scratch.jsonl`)
-2. Scale to `dr1_10k_scratch.jsonl` if time permits
-3. `train_model.py --codec-ckpt .../codec_v2/best.pt` Approach A then B (4× GPU DDP)
-4. Record transformer run IDs in `TRAINING_REGISTRY.yaml`
+1. **Phase 5:** `train_model.py` with `--codec-ckpt .../codec_v2/best.pt` — Approach A then B (4× GPU DDP on `dr1_10k_scratch.jsonl` if staged)
+2. Optional: codec eval notebook (`03_phase_codec_eval.ipynb`) on held-out healpix
+3. Optional: retrain codec on `dr1_10k` if 1k tokenizer quality insufficient
+4. Record transformer W&B run IDs in `TRAINING_REGISTRY.yaml`
+5. Code hardening: skip non-finite / clipped loss batches; robust EMA (future)

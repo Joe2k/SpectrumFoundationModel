@@ -6,9 +6,13 @@ runs:
     wandb_id: nv7py9b1
     wandb_url: https://wandb.ai/jjayaseelan-university-of-san-francisco/desi-fm-2026/runs/nv7py9b1
     phase: phase2-codec
-    state: running
+    state: finished
     manifest: dr1_1k_scratch.jsonl
-    notes: median-normalized flux, avg-loss checkpoints, log_every=10
+    steps: 4990
+    runtime_sec: 3763
+    best_avg: 1.375
+    checkpoint: deepsrch/checkpoints/codec_v2/best.pt
+    notes: production tokenizer; median-normalized flux, avg-loss checkpoints
 
   - run_name: codec_v1
     wandb_id: efvc5599
