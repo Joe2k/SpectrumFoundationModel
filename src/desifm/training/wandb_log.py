@@ -77,7 +77,47 @@ def log_metrics(run, metrics: dict[str, Any], step: int) -> None:
         pass
 
 
-def finish(run) -> None:
+def replace_best_artifact(
+    run,
+    checkpoint_path: Path,
+    artifact_name: str,
+    step: int,
+    loss: float,
+    state: dict[str, str | None],
+) -> None:
+    """Upload best.pt to W&B, deleting the previous best artifact for this run."""
+    if run is None:
+        return
+    checkpoint_path = Path(checkpoint_path)
+    if not checkpoint_path.is_file():
+        return
+    try:
+        import wandb
+
+        api = wandb.Api()
+        old_qualified = state.get("qualified")
+        if old_qualified:
+            try:
+                api.artifact(old_qualified).delete()
+            except Exception as exc:
+                print(f"[wandb] could not delete prior artifact {old_qualified}: {exc}", flush=True)
+
+        art = wandb.Artifact(
+            name=artifact_name,
+            type="model",
+            metadata={"step": step, "loss": float(loss)},
+        )
+        art.add_file(str(checkpoint_path), name="best.pt")
+        run.log_artifact(art, aliases=["best"])
+        qualified = f"{run.entity}/{run.project}/{art.name}:v{art.version}"
+        state["qualified"] = qualified
+        run.log({"train/best_loss": loss, "checkpoint/step": step}, step=step)
+        print(f"[wandb] uploaded best artifact {qualified} (step={step} loss={loss:.4f})", flush=True)
+    except Exception as exc:
+        print(f"[wandb] artifact upload failed: {exc}", flush=True)
+
+
+def finish(run, artifact_state: dict[str, str | None] | None = None) -> None:
     if run is not None:
         try:
             run.finish()
