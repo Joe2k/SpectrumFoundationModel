@@ -115,7 +115,7 @@ def main():
     p.add_argument("--d-model", type=int, default=512)
     p.add_argument("--wandb-mode", default="online")
     p.add_argument("--log-every", type=int, default=10, help="Log train metrics every N steps")
-    p.add_argument("--val-every", type=int, default=0, help="Run validation every N steps (0 = auto)")
+    p.add_argument("--val-every", type=int, default=500, help="Run validation every N steps (0 = disable)")
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--synthetic", action="store_true", help="Use random spectra (no FITS/manifest)")
     args = p.parse_args()
