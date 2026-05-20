@@ -6,7 +6,7 @@ This codebase was rewritten cleanly for the final project. It is **not** a copy 
 
 ## Design
 
-- **Spectrum codec**: ConvNeXt + LFQ; mask-aware norm, arcsinh compression, Huber loss → 273 tokens
+- **Spectrum tokenizer (phase 5 default)**: official [Polymathic AION](https://github.com/PolymathicAI/AION) DESI codec (`tok_spectrum_desi`, 273 tokens). Legacy in-repo `SpectrumCodec` via `--spectrum-tokenizer desifm`.
 - **Redshift codec**: empirical CDF → Gaussian → uniform bins (256 levels)
 - **Transformer**: encoder-decoder with modality embeddings
 - **Approach A**: encoder sees `z`; auxiliary MLP on pooled encoder for joint redshift learning
@@ -25,7 +25,8 @@ Then use `.venv/bin/python` (or `source .venv/bin/activate`). Shortcuts:
 ```bash
 make bootstrap   # same as the script above
 make test        # pytest inside .venv
-make smoke       # local training smoke (requires .venv)
+make smoke       # AION tokenizer + transformer smoke (requires .venv + [aion])
+make test-aion   # pytest -m aion only
 make download    # DR1 sample download script
 ```
 
@@ -59,6 +60,7 @@ make download
 See [docs/NERSC_INTERACTIVE.md](docs/NERSC_INTERACTIVE.md).
 
 - W&B project: **`desi-fm-2026`** — put `WANDB_API_KEY=...` in `.env` at repo root (local only; not committed)
+- AION codec weights (gated): `HF_TOKEN=...` in the same `.env` (loaded automatically by training/smoke scripts)
 - Train only on `*_scratch.jsonl` manifests
 - Logs: `RESEARCH_LOG.md`, `TRAINING_REGISTRY.yaml`
 

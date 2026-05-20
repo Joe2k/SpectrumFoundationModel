@@ -10,7 +10,7 @@ if [[ ! -x "${ROOT}/.venv/bin/python" ]]; then
 fi
 
 "${ROOT}/.venv/bin/python" -m pip install -U pip
-"${ROOT}/.venv/bin/pip" install -e ".[dev]"
+"${ROOT}/.venv/bin/pip" install -e ".[dev,aion]"
 
 echo "Done. Use this interpreter for all work in this repo:"
 echo "  ${ROOT}/.venv/bin/python"

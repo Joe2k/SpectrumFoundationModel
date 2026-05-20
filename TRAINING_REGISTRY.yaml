@@ -87,3 +87,26 @@ runs:
     state: killed
     manifest: dr1_1k_scratch.jsonl
     notes: abandoned — raw-flux loss spikes; superseded by codec_v2
+
+  - run_name: codec_v5b_r6
+    phase: phase2-codec
+    state: cancelled
+    notes: superseded by official AION spectrum tokenizer for phase 5
+
+  - run_name: p5_approach_b_aion
+    phase: phase5-transformer
+    state: planned
+    manifest: dr1_10k_scratch.jsonl
+    spectrum_tokenizer: aion
+    approach: b
+    steps: 10000
+    notes: primary submission run; 4 GPU DDP
+
+  - run_name: p5_approach_a_aion
+    phase: phase5-transformer
+    state: planned
+    manifest: dr1_10k_scratch.jsonl
+    spectrum_tokenizer: aion
+    approach: a
+    steps: 10000
+    notes: run after B if time permits

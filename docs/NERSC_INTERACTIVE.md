@@ -176,19 +176,36 @@ python scripts/train_codec.py \
 
 **Note:** `codec_v2` checkpoints used a simpler median norm; retrain for `codec_v3` (incompatible input pipeline).
 
-## Train model (4 GPU DDP, Approach A then B)
+## Train model (4 GPU DDP, official AION spectrum tokenizer)
+
+**Prereq:** `pip install -e ".[dev,aion]"` in project venv. HF auth for gated `polymathic-ai/aion-base`: either copy repo `.env` with `HF_TOKEN=...` to NERSC, or `huggingface-cli login`.
 
 ```bash
-python -m torch.distributed.run --nproc_per_node=4 scripts/train_model.py \
-  --manifest $NERSC_SCRATCH_ROOT/manifests/dr1_10k_scratch.jsonl \
-  --codec-ckpt $NERSC_SCRATCH_ROOT/checkpoints/codec_v1/best.pt \
-  --approach a --run-name p5_approach_a --wandb-mode online
+# Encode smoke (1 process)
+python scripts/smoke_aion_tokenizer.py --synthetic
 
+# Transformer smoke (~30 steps)
+python scripts/train_model.py --synthetic --smoke --spectrum-tokenizer aion \
+  --approach b --run-name p5_smoke_b_aion --wandb-mode online
+
+# Production — Approach B first (assignment focus)
 python -m torch.distributed.run --nproc_per_node=4 scripts/train_model.py \
   --manifest $NERSC_SCRATCH_ROOT/manifests/dr1_10k_scratch.jsonl \
-  --codec-ckpt $NERSC_SCRATCH_ROOT/checkpoints/codec_v1/best.pt \
-  --approach b --run-name p5_approach_b --wandb-mode online
+  --spectrum-tokenizer aion \
+  --approach b --run-name p5_approach_b_aion \
+  --steps 10000 --batch-size 8 --wandb-mode online
+
+# Approach A (if time)
+python -m torch.distributed.run --nproc_per_node=4 scripts/train_model.py \
+  --manifest $NERSC_SCRATCH_ROOT/manifests/dr1_10k_scratch.jsonl \
+  --spectrum-tokenizer aion \
+  --approach a --run-name p5_approach_a_aion \
+  --steps 10000 --batch-size 8 --wandb-mode online
 ```
+
+**Legacy** (desifm `codec_v2` only): add `--spectrum-tokenizer desifm --codec-ckpt $NERSC_SCRATCH_ROOT/deepsrch/checkpoints/codec_v2/best.pt`.
+
+**Note:** AION encode per batch is heavier than a small desifm codec; use `batch-size 4–8` if OOM or low step/s.
 
 ## Local smoke (no FITS, synthetic data)
 

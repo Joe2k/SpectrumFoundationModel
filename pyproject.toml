@@ -21,6 +21,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pyyaml>=6.0"]
+aion = ["polymathic-aion>=0.0.2", "huggingface_hub>=0.20", "safetensors>=0.4.3"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -28,3 +29,6 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "aion: tests that require polymathic-aion and HF codec weights",
+]

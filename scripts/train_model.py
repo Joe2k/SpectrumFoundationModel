@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from desifm.data.dr1_stream import DR1StreamDataset, collate_spectra, healpix_split, load_manifest
 from desifm.data.synthetic import SyntheticSpectrumDataset
 from desifm.model.transformer import DesiFoundationModel
+from desifm.tokenization.aion_bridge import AionSpectrumTokenizer
 from desifm.tokenization.redshift_codec import RedshiftCodec
 from desifm.tokenization.spectrum_codec import SpectrumCodec
 from desifm.training.batching import build_sequences, tokenize_batch
@@ -29,6 +30,7 @@ from desifm.training.distributed import (
     wrap_ddp,
 )
 from desifm.training.metrics import accuracy, masked_spec_accuracy
+from desifm.training.env import load_project_env
 from desifm.training.paths import require_scratch_manifest, scratch_root
 from desifm.training.wandb_log import finish, init_run, log_metrics
 
@@ -65,7 +67,14 @@ def collect_z_synthetic(n: int = 5000, seed: int = 0) -> torch.Tensor:
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--manifest", type=Path, default=None)
-    p.add_argument("--codec-ckpt", type=Path, required=True)
+    p.add_argument(
+        "--spectrum-tokenizer",
+        choices=["aion", "desifm"],
+        default="aion",
+        help="Spectrum tokenizer: official AION (default) or desifm SpectrumCodec checkpoint",
+    )
+    p.add_argument("--codec-ckpt", type=Path, default=None, help="Required when --spectrum-tokenizer desifm")
+    p.add_argument("--aion-hf-repo", default="polymathic-ai/aion-base")
     p.add_argument("--approach", choices=["a", "b"], required=True)
     p.add_argument("--run-name", required=True)
     p.add_argument("--scratch-out", type=Path, default=None)
@@ -80,6 +89,10 @@ def main():
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--synthetic", action="store_true", help="Use random spectra (no FITS/manifest)")
     args = p.parse_args()
+    load_project_env()
+
+    if args.spectrum_tokenizer == "desifm" and args.codec_ckpt is None:
+        raise SystemExit("--codec-ckpt required when --spectrum-tokenizer desifm")
 
     rank, world_size, _local_rank, device = setup_distributed()
     main_proc = is_main_process(rank)
@@ -126,9 +139,14 @@ def main():
         run_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = run_dir / "metrics.jsonl"
 
-    codec = SpectrumCodec().to(device)
-    codec.load_state_dict(torch.load(args.codec_ckpt, map_location=device, weights_only=False)["model"])
-    codec.eval()
+    if args.spectrum_tokenizer == "aion":
+        spectrum_tok = AionSpectrumTokenizer(device, hf_repo=args.aion_hf_repo)
+    else:
+        spectrum_tok = SpectrumCodec().to(device)
+        spectrum_tok.load_state_dict(
+            torch.load(args.codec_ckpt, map_location=device, weights_only=False)["model"]
+        )
+        spectrum_tok.eval()
 
     z_codec = RedshiftCodec()
     if main_proc:
@@ -153,7 +171,11 @@ def main():
             vars(args),
             run_dir / "wandb",
             group=f"phase5-approach-{args.approach}",
-            tags=["final-2026", f"approach-{args.approach}"],
+            tags=[
+                "final-2026",
+                f"approach-{args.approach}",
+                f"tokenizer-{args.spectrum_tokenizer}",
+            ],
         )
 
     step, best_val = 0, float("inf")
@@ -173,7 +195,7 @@ def main():
 
         for g in opt.param_groups:
             g["lr"] = lr_schedule(step, args.lr, warmup=warmup, total=args.steps)
-        spec_idx, z_idx = tokenize_batch(batch, codec, z_codec, device)
+        spec_idx, z_idx = tokenize_batch(batch, spectrum_tok, z_codec, device)
         enc, dec, tgt, mask_pos = build_sequences(
             spec_idx, z_idx, args.approach, encoder_mask_ratio=args.encoder_mask_ratio
         )
@@ -193,17 +215,29 @@ def main():
         if main_proc and step % 20 == 0:
             m = accuracy(logits.detach(), tgt)
             ms = masked_spec_accuracy(logits.detach(), tgt, mask_pos)
+            n_unique = int(spec_idx.unique().numel())
             rec = {
                 "kind": "train",
                 "step": step,
                 "loss": loss.item(),
+                "spectrum_tokenizer": args.spectrum_tokenizer,
+                "spec_codes_unique": n_unique,
                 **{f"acc/{k}": v for k, v in m.items()},
                 "acc/masked_spec": ms,
             }
             with metrics_path.open("a") as f:
                 f.write(json.dumps(rec) + "\n")
             if wb:
-                log_metrics(wb, {"train/loss": loss.item(), "train/z_acc": m["z"], "train/spec_acc": m["spec"]}, step)
+                log_metrics(
+                    wb,
+                    {
+                        "train/loss": loss.item(),
+                        "train/z_acc": m["z"],
+                        "train/spec_acc": m["spec"],
+                        "train/spec_codes_unique": n_unique,
+                    },
+                    step,
+                )
 
         if main_proc and step > 0 and step % max(20, args.steps // 3) == 0:
             unwrap(model).eval()
@@ -212,7 +246,7 @@ def main():
                 for vb in val_loader:
                     if vb is None:
                         continue
-                    si, zi = tokenize_batch(vb, codec, z_codec, device)
+                    si, zi = tokenize_batch(vb, spectrum_tok, z_codec, device)
                     enc_v, dec_v, tgt_v, _mp = build_sequences(
                         si, zi, args.approach, args.encoder_mask_ratio
                     )
@@ -234,6 +268,7 @@ def main():
                         "model": unwrap(model).state_dict(),
                         "z_codec": z_codec.state_dict(),
                         "approach": args.approach,
+                        "spectrum_tokenizer": args.spectrum_tokenizer,
                         "step": step,
                     },
                     run_dir / "best.pt",

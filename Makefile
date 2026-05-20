@@ -14,6 +14,10 @@ test:
 smoke:
 	bash scripts/run_smoke_local.sh
 
+test-aion:
+	@test -x $(PYTHON) || (echo "Run: make bootstrap" >&2; exit 1)
+	$(PYTHON) -m pytest -m aion -v
+
 download:
 	@test -x $(PYTHON) || (echo "Run: make bootstrap" >&2; exit 1)
 	$(PYTHON) scripts/download_dr1_local.py

@@ -523,9 +523,6 @@ def main():
             getattr(args, "loss_profile", "n/a"),
             getattr(args, "diversity_loss_weight", 0.0) or 0.0,
             getattr(args, "lambda_arcsinh", 0.0) or 0.0,
-            getattr(args, "quant_temperature_start", 1.0) or 1.0,
-            getattr(args, "quant_temperature_min", 0.1) or 0.1,
-            getattr(args, "quant_temperature_anneal_steps", 0) or 0,
             commitment,
         )
         eff_batch = args.batch_size * world_size
@@ -669,10 +666,9 @@ def main():
             if args.lambda_phys > 0
             else 0.0
         )
-        fwd_extra = {
-            **fwd_extra_base,
-            "quant_temperature": quant_temperature_for_step(step),
-        }
+        fwd_extra = dict(fwd_extra_base)
+        if args.codec_version == "v5":
+            fwd_extra["quant_temperature"] = quant_temperature_for_step(step)
         out = unwrap(model)(
             x,
             denorm,
@@ -782,10 +778,9 @@ def main():
                     phys_unlocked=phys_unlocked,
                     phys_ramp_origin=phys_ramp_origin,
                 )
-                val_fwd = {
-                    **fwd_extra_base,
-                    "quant_temperature": quant_temperature_for_step(step),
-                }
+                val_fwd = dict(fwd_extra_base)
+                if args.codec_version == "v5":
+                    val_fwd["quant_temperature"] = quant_temperature_for_step(step)
                 val_stats = run_validation(
                     unwrap(model),
                     val_loader,

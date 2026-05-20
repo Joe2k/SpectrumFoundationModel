@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, Optional, Tuple
+from typing import Literal, Optional, Protocol, Tuple, runtime_checkable
 
 import torch
 
@@ -15,16 +15,24 @@ from desifm.training.codec_input import prepare_codec_batch
 Approach = Literal["a", "b"]
 
 
+@runtime_checkable
+class SpectrumTokenizer(Protocol):
+    def encode_batch(self, batch: dict) -> tuple[torch.Tensor, dict]: ...
+
+
 def tokenize_batch(
     batch: dict,
-    codec: SpectrumCodec,
+    spectrum_tok: SpectrumCodec | SpectrumTokenizer,
     z_codec: RedshiftCodec,
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     batch = {k: v.to(device) if torch.is_tensor(v) else v for k, v in batch.items()}
-    x, denorm, _ = prepare_codec_batch(batch)
     with torch.no_grad():
-        spec_idx, _ = codec.encode(x, denorm)
+        if hasattr(spectrum_tok, "encode_batch") and not isinstance(spectrum_tok, SpectrumCodec):
+            spec_idx, _meta = spectrum_tok.encode_batch(batch)
+        else:
+            x, denorm, _ = prepare_codec_batch(batch)
+            spec_idx, _ = spectrum_tok.encode(x, denorm)
     z_idx = torch.tensor([z_codec.encode(float(z)) for z in batch["z"]], device=device, dtype=torch.long)
     return spec_idx, z_idx
 

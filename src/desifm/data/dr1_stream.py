@@ -87,6 +87,7 @@ class DR1StreamDataset(Dataset):
             "flux": torch.from_numpy(stitched["flux"]),
             "ivar": torch.from_numpy(stitched["ivar"]),
             "mask": torch.from_numpy(stitched["mask"]),
+            "wavelength": torch.from_numpy(stitched["wavelength"]),
             "z": torch.tensor(z, dtype=torch.float32),
         }
 
@@ -104,10 +105,20 @@ def collate_spectra(batch: list) -> dict | None:
         out[: t.shape[0]] = t
         return out
 
+    def pad_wave(t):
+        if t.shape[0] == L:
+            return t
+        out = torch.empty((L,), dtype=t.dtype)
+        out[: t.shape[0]] = t
+        if t.shape[0] > 0:
+            out[t.shape[0] :] = t[-1]
+        return out
+
     return {
         "flux": torch.stack([pad(b["flux"]) for b in batch]),
         "ivar": torch.stack([pad(b["ivar"]) for b in batch]),
         "mask": torch.stack([pad(b["mask"], fill=True) for b in batch]),
+        "wavelength": torch.stack([pad_wave(b["wavelength"]) for b in batch]),
         "z": torch.stack([b["z"] for b in batch]),
     }
 

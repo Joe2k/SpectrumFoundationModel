@@ -16,16 +16,9 @@ def _project_root() -> Path:
 
 def _load_project_dotenv() -> bool:
     """Load .env from repo root. Returns True if file exists."""
-    try:
-        from dotenv import load_dotenv
-    except ImportError:
-        return False
-    env_path = _project_root() / ".env"
-    if env_path.is_file():
-        load_dotenv(env_path, override=False)
-        return True
-    load_dotenv(override=False)
-    return False
+    from desifm.training.env import load_project_env
+
+    return load_project_env()
 
 
 def _configure_wandb_dirs(log_dir: Path) -> None:

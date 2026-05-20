@@ -283,3 +283,70 @@ python scripts/train_codec.py \
   --checkpoint-metric val_rms \
   --wandb-mode online
 ```
+
+---
+
+## 2026-05-19: Pivot to official AION spectrum tokenizer (phase 5)
+
+### Why
+
+- `codec_v4` / `codec_v5b` runs collapsed to ~3–5 / 256 LFQ codes on val; Tier-1 gate (≥77 unique codes) not met.
+- Retraining custom codec ~11h+ on 4×GPU before deadline; transformer is the submission-critical path.
+
+### What changed
+
+| Piece | Before | After |
+|-------|--------|-------|
+| Spectrum tokens | `SpectrumCodec` / v5 (train from scratch) | **Official** [`polymathic-aion`](https://pypi.org/project/polymathic-aion/) `CodecManager` + `DESISpectrum` → `tok_spectrum_desi` (**273** codes, 0–1023) |
+| Redshift tokens | `RedshiftCodec` | **Unchanged** (Approach A/B `REDMASK` / `REDSHIFT_OFFSET`) |
+| Data batch | `flux`, `ivar`, `mask`, `z` | + **`wavelength`** (stitched Å); collate pads wavelength (edge-repeat) |
+| `train_model.py` | `--codec-ckpt` required | `--spectrum-tokenizer aion` (default); `--codec-ckpt` only for `desifm` legacy |
+
+### Code
+
+- `src/desifm/tokenization/aion_bridge.py` — `AionSpectrumTokenizer`
+- `src/desifm/tokenization/aion_grid.py` — resample to `GRID_SIZE=8704` when needed
+- `scripts/smoke_aion_tokenizer.py` — encode smoke
+- Optional extra: `pip install -e ".[dev,aion]"` (includes `safetensors`)
+
+### HF
+
+- Weights: `polymathic-ai/aion-base` (gated; HF login confirmed on dev machine).
+- First encode downloads codec shards (~tens of seconds).
+
+### Deprecate on NERSC
+
+- **Stop** active `codec_v5b_*` jobs.
+- `codec_v2` (`nv7py9b1`) remains documented legacy path: `--spectrum-tokenizer desifm --codec-ckpt .../codec_v2/best.pt`.
+
+### Local verification (run after pull)
+
+```bash
+bash scripts/bootstrap_venv.sh
+.venv/bin/python -m pytest -v
+.venv/bin/python scripts/smoke_aion_tokenizer.py --synthetic
+bash scripts/run_smoke_local.sh
+```
+
+Optional legacy codec smoke: `SMOKE_DESIFM_CODEC=1 bash scripts/run_smoke_local.sh`
+
+### NERSC transformer (planned)
+
+| Run | Approach | Command gist |
+|-----|----------|--------------|
+| `p5_smoke_b_aion` | B | `--synthetic --smoke --spectrum-tokenizer aion` |
+| `p5_approach_b_aion` | B | DDP 4 GPU, `dr1_10k_scratch.jsonl`, 10k steps |
+| `p5_approach_a_aion` | A | same, if time |
+
+See [`docs/NERSC_INTERACTIVE.md`](docs/NERSC_INTERACTIVE.md) for full commands.
+
+### Test log (local)
+
+**2026-05-19**
+
+| Check | Result |
+|-------|--------|
+| `pytest -q` | **89 passed** |
+| `smoke_aion_tokenizer.py --synthetic` | shape `(2, 273)`, codes 10–1023, **n_unique=342** (batch), resampled to 8704 |
+| `run_smoke_local.sh` (AION A+B) | OK; `smoke_approach_a_aion` best_val≈163.4, `smoke_approach_b_aion` best_val≈159.3 |
+| `test_train_model_desifm.py` | PASS (legacy desifm path after `train_codec` logging/`quant_temperature` fix) |
