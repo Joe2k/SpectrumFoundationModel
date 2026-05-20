@@ -57,21 +57,27 @@ class DR1StreamDataset(Dataset):
             self._open[rec_idx] = (fits.open(rec["coadd"], memmap=True), fits.open(rec["redrock"], memmap=True))
         return self._open[rec_idx]
 
-    def __getitem__(self, idx: int) -> dict | None:
+    def is_valid(self, idx: int) -> bool:
+        """Cheap row filter (no band stitch). Use for cache index scans."""
         rec_idx, row = self.index[idx]
         coadd, redrock = self._hdus(rec_idx)
         if self.require_good_z:
             if int(redrock["REDSHIFTS"].data["ZWARN"][row]) != 0:
-                return None
+                return False
             if int(coadd["FIBERMAP"].data["COADD_FIBERSTATUS"][row]) != 0:
-                return None
+                return False
         flux_sum = (
             np.abs(coadd["B_FLUX"].data[row]).sum()
             + np.abs(coadd["R_FLUX"].data[row]).sum()
             + np.abs(coadd["Z_FLUX"].data[row]).sum()
         )
-        if flux_sum == 0:
+        return bool(flux_sum)
+
+    def __getitem__(self, idx: int) -> dict | None:
+        if not self.is_valid(idx):
             return None
+        rec_idx, row = self.index[idx]
+        coadd, redrock = self._hdus(rec_idx)
         stitched = stitch_bands(
             [coadd["B_WAVELENGTH"].data, coadd["R_WAVELENGTH"].data, coadd["Z_WAVELENGTH"].data],
             [coadd["B_FLUX"].data[row], coadd["R_FLUX"].data[row], coadd["Z_FLUX"].data[row]],

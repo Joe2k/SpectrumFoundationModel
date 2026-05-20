@@ -122,10 +122,17 @@ def collect_valid_indices(
     local: list[int] = []
     t0 = time.perf_counter()
     for i in range(rank, n, world_size):
-        if ds[i] is not None:
+        if ds.is_valid(i):
             local.append(i)
-        if log is not None and world_size > 1 and (i - rank) % max(1, (n // world_size) // 20) == 0:
-            log.info("[rank %d/%d] scan progress %d / %d (local valid=%d)", rank, world_size, i, n, len(local))
+        if log is not None and rank == 0 and world_size > 1 and (i - rank) % max(1, (n // world_size) // 20) == 0:
+            log.info(
+                "index scan shard 0/%d at row %d / %d (~%d rows/rank, local valid=%d)",
+                world_size,
+                i,
+                n,
+                (n + world_size - 1) // world_size,
+                len(local),
+            )
 
     if world_size > 1 and dist.is_initialized():
         gathered: list[list[int]] = [None] * world_size  # type: ignore[assignment]
@@ -172,28 +179,13 @@ def _log_cache_progress(
     global_rate = global_done / elapsed
     local_eta = (local_total - local_done) / local_rate if local_rate > 0 else 0.0
     global_eta = (global_total - global_done) / global_rate if global_rate > 0 else 0.0
-    if rank == 0:
-        log.info(
-            "[global] cached %d / %d (%.2f spec/s, ETA %.0fs) | rank0 local %d / %d",
-            global_done,
-            global_total,
-            global_rate,
-            global_eta,
-            local_done,
-            local_total,
-        )
-    else:
-        log.info(
-            "[rank %d/%d] cached %d / %d assigned (%.2f spec/s, ETA %.0fs) | global %d / %d",
-            rank,
-            world_size,
-            local_done,
-            local_total,
-            local_rate,
-            local_eta,
-            global_done,
-            global_total,
-        )
+    log.info(
+        "cached %d / %d (%.2f spec/s, ETA %.0fs)",
+        global_done,
+        global_total,
+        global_rate,
+        global_eta,
+    )
 
 
 def build_aion_token_cache(
@@ -227,13 +219,15 @@ def build_aion_token_cache(
     records = load_manifest(manifest)
     ds = DR1StreamDataset(records, max_spectra=max_spectra)
 
-    if log is not None:
-        log.info(
-            "[rank %d/%d] scanning manifest for valid spectra (%d dataset rows)...",
-            rank,
-            world_size,
-            len(ds),
-        )
+    if log is not None and rank == 0:
+        if world_size > 1:
+            log.info(
+                "CPU index scan (%d rows, %d-way shard) — GPUs idle until encode starts...",
+                len(ds),
+                world_size,
+            )
+        else:
+            log.info("CPU index scan (%d rows) — GPU idle until encode starts...", len(ds))
 
     valid_indices = collect_valid_indices(ds, rank=rank, world_size=world_size, log=log)
     n_valid = len(valid_indices)
@@ -256,17 +250,18 @@ def build_aion_token_cache(
     my_indices = valid_indices[rank::world_size]
     n_assigned = len(my_indices)
 
-    if log is not None:
+    if log is not None and rank == 0:
+        per_rank = (n_valid + world_size - 1) // world_size if world_size > 0 else n_valid
         log.info(
-            "[rank %d/%d] encoding %d / %d spectra (batch_size=%d device=%s)",
-            rank,
-            world_size,
-            n_assigned,
+            "encoding %d spectra (%d per GPU, batch_size=%d, device=%s)",
             n_valid,
+            per_rank,
             batch_size,
             device,
         )
 
+    if log is not None and rank == 0:
+        log.info("loading AION on %s — GPU encode starting", device)
     tok = AionSpectrumTokenizer(device, hf_repo=aion_hf_repo)
     pending: list[dict] = []
     pending_hp: list[int] = []

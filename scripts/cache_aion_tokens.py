@@ -96,11 +96,11 @@ def main():
     if main_proc and cache_dir.exists() and args.overwrite:
         log.info("overwriting cache at %s", cache_dir)
 
-    if world_size > 1:
-        log.info("manifest=%s cache_dir=%s device=%s batch_size=%d", manifest, cache_dir, device, args.batch_size)
-    elif main_proc:
+    if main_proc:
         log.info("manifest=%s", manifest)
-        log.info("cache_dir=%s device=%s batch_size=%d", cache_dir, device, args.batch_size)
+        log.info("cache_dir=%s batch_size=%d world_size=%d", cache_dir, args.batch_size, world_size)
+        if world_size > 1:
+            log.info("DDP: one log stream from rank 0; ranks 1-%d run quietly", world_size - 1)
     sys.stdout.flush()
 
     t0 = time.perf_counter()
@@ -114,7 +114,7 @@ def main():
         rank=rank,
         world_size=world_size,
         log_every=args.log_every,
-        log=log,
+        log=log if main_proc else None,
     )
     elapsed = time.perf_counter() - t0
     if main_proc:
