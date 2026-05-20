@@ -31,20 +31,33 @@ def _configure_wandb_dirs(log_dir: Path) -> None:
     os.environ.setdefault("WANDB_INIT_TIMEOUT", "120")
 
 
-def _wandb_init(mode: str, name: str, config: dict, log_dir: Path, group: str | None, tags: list[str] | None):
+def _wandb_init(
+    mode: str,
+    name: str,
+    config: dict,
+    log_dir: Path,
+    group: str | None,
+    tags: list[str] | None,
+    *,
+    resume_id: str | None = None,
+):
     import wandb
 
     # Avoid deprecated Settings fields (_disable_service, start_method) that break
     # recent wandb pydantic validation on NERSC.
-    return wandb.init(
-        project=WANDB_PROJECT,
-        name=name,
-        config=config,
-        dir=str(log_dir),
-        group=group,
-        tags=tags or ["final-2026"],
-        mode=mode,
-    )
+    kwargs: dict[str, Any] = {
+        "project": WANDB_PROJECT,
+        "name": name,
+        "config": config,
+        "dir": str(log_dir),
+        "group": group,
+        "tags": tags or ["final-2026"],
+        "mode": mode,
+    }
+    if resume_id:
+        kwargs["id"] = resume_id
+        kwargs["resume"] = "allow"
+    return wandb.init(**kwargs)
 
 
 def init_run(
@@ -54,6 +67,7 @@ def init_run(
     dir: Path,
     group: str | None = None,
     tags: list[str] | None = None,
+    resume_id: str | None = None,
 ):
     if mode == "disabled":
         return None
@@ -81,8 +95,11 @@ def init_run(
     _configure_wandb_dirs(log_dir)
 
     try:
-        run = _wandb_init(mode, name, config, log_dir, group, tags)
-        print(f"[wandb] started mode={mode} dir={log_dir}", flush=True)
+        run = _wandb_init(mode, name, config, log_dir, group, tags, resume_id=resume_id)
+        if resume_id:
+            print(f"[wandb] resumed id={resume_id} mode={mode} dir={log_dir}", flush=True)
+        else:
+            print(f"[wandb] started mode={mode} dir={log_dir}", flush=True)
         return run
     except Exception as exc:
         if mode == "offline":
@@ -95,7 +112,7 @@ def init_run(
         )
         os.environ["WANDB_MODE"] = "offline"
         try:
-            run = _wandb_init("offline", name, config, log_dir, group, tags)
+            run = _wandb_init("offline", name, config, log_dir, group, tags, resume_id=resume_id)
             print(f"[wandb] offline run dir={log_dir} (requested {requested})", flush=True)
             return run
         except Exception as exc2:

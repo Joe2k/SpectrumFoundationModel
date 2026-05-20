@@ -75,6 +75,78 @@ def lr_schedule(step: int, base: float, warmup: int, total: int) -> float:
     return base * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * t)))
 
 
+def build_checkpoint(
+    model,
+    optimizer: torch.optim.Optimizer,
+    z_codec: RedshiftCodec,
+    step: int,
+    best_val: float,
+    args: argparse.Namespace,
+) -> dict:
+    return {
+        "model": unwrap(model).state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "z_codec": z_codec.state_dict(),
+        "step": step,
+        "best_val": best_val,
+        "approach": args.approach,
+        "spectrum_tokenizer": args.spectrum_tokenizer,
+        "d_model": args.d_model,
+        "lr": args.lr,
+        "steps": args.steps,
+        "z_weight": args.z_weight,
+        "aux_z_weight": args.aux_z_weight,
+        "encoder_mask_ratio": args.encoder_mask_ratio,
+    }
+
+
+def save_checkpoint(path: Path, payload: dict, log: logging.Logger | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(payload, path)
+    if log is not None:
+        log.info("saved checkpoint step=%s -> %s", payload.get("step"), path)
+
+
+def _validate_checkpoint_meta(ckpt: dict, args: argparse.Namespace) -> None:
+    for key in ("approach", "spectrum_tokenizer", "d_model"):
+        if key in ckpt and ckpt[key] != getattr(args, key):
+            raise SystemExit(
+                f"checkpoint {key}={ckpt[key]!r} does not match CLI {getattr(args, key)!r}; "
+                "use a new --run-name or --no-resume"
+            )
+
+
+def find_resume_checkpoint(run_dir: Path) -> Path | None:
+    last = run_dir / "last.pt"
+    if last.is_file():
+        return last
+    best = run_dir / "best.pt"
+    if best.is_file():
+        return best
+    return None
+
+
+def load_resume_checkpoint(
+    path: Path,
+    model,
+    optimizer: torch.optim.Optimizer,
+    z_codec: RedshiftCodec,
+    args: argparse.Namespace,
+    device: torch.device,
+) -> tuple[int, float, bool]:
+    """Load checkpoint; return (start_step, best_val, full_resume)."""
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    _validate_checkpoint_meta(ckpt, args)
+    unwrap(model).load_state_dict(ckpt["model"])
+    z_codec.load_state_dict(ckpt["z_codec"])
+    full = "optimizer" in ckpt
+    if full:
+        optimizer.load_state_dict(ckpt["optimizer"])
+    start = int(ckpt.get("step", -1)) + 1
+    best_val = float(ckpt.get("best_val", float("inf")))
+    return start, best_val, full
+
+
 def collect_z(records: list[dict], max_files: int = 100) -> torch.Tensor:
     import numpy as np
     from astropy.io import fits
@@ -117,7 +189,8 @@ def main():
         "--num-workers",
         type=int,
         default=0,
-        help="DataLoader workers per process (FITS I/O). Try 4–8 on NERSC per GPU rank.",
+        help="DataLoader workers per GPU rank. DDP total = world_size * num_workers; "
+        "use 2 on 4-GPU NERSC (8 loaders) to avoid host-RAM OOM killing workers.",
     )
     p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--z-weight", type=float, default=20.0)
@@ -136,6 +209,11 @@ def main():
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--synthetic", action="store_true", help="Use random spectra (no FITS/manifest)")
+    p.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Ignore run_dir/last.pt (or best.pt) and train from step 0",
+    )
     args = p.parse_args()
     load_project_env()
 
@@ -235,20 +313,69 @@ def main():
         )
         spectrum_tok.eval()
 
-    z_codec = RedshiftCodec()
-    if main_proc:
-        z_codec.fit(z_samples)
-    if world_size > 1:
-        import torch.distributed as dist
-
-        state = [z_codec.state_dict()] if rank == 0 else [None]
-        dist.broadcast_object_list(state, src=0)
-        if rank != 0:
-            z_codec.load_state_dict(state[0])
-
     model = DesiFoundationModel(d_model=args.d_model).to(device)
     model = wrap_ddp(model, device, world_size)
     opt = torch.optim.AdamW(unwrap(model).parameters(), lr=args.lr)
+
+    z_codec = RedshiftCodec()
+    step, best_val = 0, float("inf")
+    resume_ckpt: Path | None = None if args.no_resume else find_resume_checkpoint(run_dir)
+
+    if resume_ckpt is not None:
+        if main_proc:
+            start_step, best_val, full = load_resume_checkpoint(
+                resume_ckpt, model, opt, z_codec, args, device
+            )
+            step = start_step
+            if not full:
+                log.warning(
+                    "checkpoint %s has no optimizer state — model/z_codec restored; optimizer fresh",
+                    resume_ckpt,
+                )
+            log.info(
+                "resumed from %s at step %d (target steps=%d) best_val=%.4f",
+                resume_ckpt.name,
+                step,
+                args.steps,
+                best_val,
+            )
+        if world_size > 1:
+            import torch.distributed as dist
+
+            if not main_proc:
+                step, best_val, _ = load_resume_checkpoint(
+                    resume_ckpt, model, opt, z_codec, args, device
+                )
+            meta = torch.tensor([step, best_val], device=device, dtype=torch.float64)
+            dist.broadcast(meta, src=0)
+            step = int(meta[0].item())
+            best_val = float(meta[1].item())
+    else:
+        if main_proc:
+            z_codec.fit(z_samples)
+        if world_size > 1:
+            import torch.distributed as dist
+
+            state = [z_codec.state_dict()] if rank == 0 else [None]
+            dist.broadcast_object_list(state, src=0)
+            if rank != 0:
+                z_codec.load_state_dict(state[0])
+
+    if resume_ckpt is not None and step >= args.steps:
+        if main_proc:
+            log.info("checkpoint step %d >= --steps %d; nothing to do", step, args.steps)
+            print(f"done {args.run_name} already at step {step}", flush=True)
+        if world_size > 1:
+            import torch.distributed as dist
+
+            dist.barrier()
+        cleanup_distributed()
+        return
+
+    wandb_id_path = run_dir / "wandb_id.txt"
+    wandb_resume_id = (
+        wandb_id_path.read_text().strip() if resume_ckpt is not None and wandb_id_path.is_file() else None
+    )
 
     wb = None
     if main_proc:
@@ -263,199 +390,206 @@ def main():
                 f"approach-{args.approach}",
                 f"tokenizer-{args.spectrum_tokenizer}",
             ],
+            resume_id=wandb_resume_id,
         )
-
-    step, best_val = 0, float("inf")
+        if wb is not None and hasattr(wb, "id") and wb.id and not wandb_id_path.is_file():
+            wandb_id_path.write_text(str(wb.id))
     train_it = iter(train_loader)
     warmup = min(200, max(1, args.steps // 5))
     t0 = time.perf_counter()
 
-    while step < args.steps:
-        if train_sampler is not None:
-            train_sampler.set_epoch(step)
-        try:
-            batch = next(train_it)
-        except StopIteration:
-            train_it = iter(train_loader)
-            batch = next(train_it)
-        if batch is None:
-            continue
+    try:
+        while step < args.steps:
+            if train_sampler is not None:
+                train_sampler.set_epoch(step)
+            try:
+                batch = next(train_it)
+            except StopIteration:
+                train_it = iter(train_loader)
+                batch = next(train_it)
+            if batch is None:
+                continue
 
-        for g in opt.param_groups:
-            g["lr"] = lr_schedule(step, args.lr, warmup=warmup, total=args.steps)
-        spec_idx, z_idx = tokenize_batch(batch, spectrum_tok, z_codec, device)
-        enc, dec, tgt, mask_pos = build_sequences(
-            spec_idx, z_idx, args.approach, encoder_mask_ratio=args.encoder_mask_ratio
-        )
-        logits, loss, loss_parts = unwrap(model)(
-            enc,
-            dec,
-            targets=tgt,
-            z_weight=args.z_weight,
-            aux_z_weight=args.aux_z_weight,
-            approach=args.approach,
-        )
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(unwrap(model).parameters(), args.grad_clip)
-        opt.step()
-        lp = _loss_parts_float(loss_parts)
-
-        if main_proc and step % args.log_every == 0:
-            m = accuracy(logits.detach(), tgt)
-            ms = masked_spec_accuracy(logits.detach(), tgt, mask_pos)
-            n_unique = int(spec_idx.unique().numel())
-            lr = opt.param_groups[0]["lr"]
-            sps = (step + 1) / max(time.perf_counter() - t0, 1e-6)
-            rec = {
-                "kind": "train",
-                "step": step,
-                "loss": loss.item(),
-                "grad_norm": float(grad_norm),
-                "lr": lr,
-                "steps_per_sec": sps,
-                "spectrum_tokenizer": args.spectrum_tokenizer,
-                "spec_codes_unique": n_unique,
-                **{f"acc/{k}": v for k, v in m.items()},
-                "acc/masked_spec": ms,
-                **lp,
-            }
-            append_metrics(metrics_path, rec)
-            log.info(
-                "train step %d/%d loss=%.4f loss_z=%.4f loss_spec=%.4f z_acc=%.3f spec_acc=%.3f "
-                "masked_spec=%.3f grad_norm=%.3f codes_unique=%d lr=%.2e (%.2f step/s)",
-                step,
-                args.steps,
-                loss.item(),
-                lp.get("loss_z", float("nan")),
-                lp.get("loss_spec", float("nan")),
-                m["z"],
-                m["spec"],
-                ms,
-                float(grad_norm),
-                n_unique,
-                lr,
-                sps,
+            for g in opt.param_groups:
+                g["lr"] = lr_schedule(step, args.lr, warmup=warmup, total=args.steps)
+            spec_idx, z_idx = tokenize_batch(batch, spectrum_tok, z_codec, device)
+            enc, dec, tgt, mask_pos = build_sequences(
+                spec_idx, z_idx, args.approach, encoder_mask_ratio=args.encoder_mask_ratio
             )
-            sys.stdout.flush()
-            if wb:
-                wb_payload = {
-                    "train/loss": loss.item(),
-                    "train/z_acc": m["z"],
-                    "train/spec_acc": m["spec"],
-                    "train/overall_acc": m["overall"],
-                    "train/masked_spec_acc": ms,
-                    "train/spec_codes_unique": n_unique,
-                    "train/lr": lr,
-                    "train/steps_per_sec": sps,
-                    "train/grad_norm": float(grad_norm),
-                    "train/loss_z": lp.get("loss_z", 0.0),
-                    "train/loss_spec": lp.get("loss_spec", 0.0),
-                    "train/perplexity_spec": lp.get("perplexity_spec", 0.0),
+            logits, loss, loss_parts = unwrap(model)(
+                enc,
+                dec,
+                targets=tgt,
+                z_weight=args.z_weight,
+                aux_z_weight=args.aux_z_weight,
+                approach=args.approach,
+            )
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(unwrap(model).parameters(), args.grad_clip)
+            opt.step()
+            lp = _loss_parts_float(loss_parts)
+
+            if main_proc and step % args.log_every == 0:
+                m = accuracy(logits.detach(), tgt)
+                ms = masked_spec_accuracy(logits.detach(), tgt, mask_pos)
+                n_unique = int(spec_idx.unique().numel())
+                lr = opt.param_groups[0]["lr"]
+                sps = (step + 1) / max(time.perf_counter() - t0, 1e-6)
+                rec = {
+                    "kind": "train",
+                    "step": step,
+                    "loss": loss.item(),
+                    "grad_norm": float(grad_norm),
+                    "lr": lr,
+                    "steps_per_sec": sps,
+                    "spectrum_tokenizer": args.spectrum_tokenizer,
+                    "spec_codes_unique": n_unique,
+                    **{f"acc/{k}": v for k, v in m.items()},
+                    "acc/masked_spec": ms,
+                    **lp,
                 }
-                if "loss_aux_z" in lp:
-                    wb_payload["train/loss_aux_z"] = lp["loss_aux_z"]
-                log_metrics(wb, wb_payload, step)
-
-        if main_proc and val_every > 0 and step > 0 and step % val_every == 0:
-            log.info("validation step %d ...", step)
-            sys.stdout.flush()
-            unwrap(model).eval()
-            vloss, vn = 0.0, 0
-            vz_acc, vspec_acc, vmasked = 0.0, 0.0, 0.0
-            vloss_z, vloss_spec = 0.0, 0.0
-            with torch.no_grad():
-                for vb in val_loader:
-                    if vb is None:
-                        continue
-                    si, zi = tokenize_batch(vb, spectrum_tok, z_codec, device)
-                    enc_v, dec_v, tgt_v, vmp = build_sequences(
-                        si, zi, args.approach, args.encoder_mask_ratio
-                    )
-                    lg, ls, vparts = unwrap(model)(
-                        enc_v,
-                        dec_v,
-                        targets=tgt_v,
-                        z_weight=args.z_weight,
-                        aux_z_weight=args.aux_z_weight,
-                        approach=args.approach,
-                    )
-                    vm = accuracy(lg, tgt_v)
-                    vms = masked_spec_accuracy(lg, tgt_v, vmp)
-                    vlp = _loss_parts_float(vparts)
-                    vloss += ls.item()
-                    vz_acc += vm["z"]
-                    vspec_acc += vm["spec"]
-                    vmasked += vms if not math.isnan(vms) else 0.0
-                    vloss_z += vlp.get("loss_z", 0.0)
-                    vloss_spec += vlp.get("loss_spec", 0.0)
-                    vn += 1
-                    if args.val_max_batches > 0 and vn >= args.val_max_batches:
-                        break
-            vloss /= max(vn, 1)
-            vz_acc /= max(vn, 1)
-            vspec_acc /= max(vn, 1)
-            vmasked /= max(vn, 1)
-            vloss_z /= max(vn, 1)
-            vloss_spec /= max(vn, 1)
-            val_rec = {
-                "kind": "val",
-                "step": step,
-                "loss": vloss,
-                "loss_z": vloss_z,
-                "loss_spec": vloss_spec,
-                "perplexity_spec": float(math.exp(min(vloss_spec, 20.0))),
-                "acc/z": vz_acc,
-                "acc/spec": vspec_acc,
-                "acc/masked_spec": vmasked,
-                "n_batches": vn,
-                "best_val_loss": min(best_val, vloss),
-            }
-            append_metrics(metrics_path, val_rec)
-            saved = vloss < best_val
-            if saved:
-                best_val = vloss
-                torch.save(
-                    {
-                        "model": unwrap(model).state_dict(),
-                        "z_codec": z_codec.state_dict(),
-                        "approach": args.approach,
-                        "spectrum_tokenizer": args.spectrum_tokenizer,
-                        "step": step,
-                    },
-                    run_dir / "best.pt",
-                )
-            log.info(
-                "val step %d loss=%.4f loss_z=%.4f loss_spec=%.4f z_acc=%.3f spec_acc=%.3f "
-                "masked_spec=%.3f batches=%d best_val=%.4f%s",
-                step,
-                vloss,
-                vloss_z,
-                vloss_spec,
-                vz_acc,
-                vspec_acc,
-                vmasked,
-                vn,
-                best_val,
-                " -> saved best.pt" if saved else "",
-            )
-            sys.stdout.flush()
-            if wb:
-                log_metrics(
-                    wb,
-                    {
-                        "val/loss": vloss,
-                        "val/loss_z": vloss_z,
-                        "val/loss_spec": vloss_spec,
-                        "val/perplexity_spec": val_rec["perplexity_spec"],
-                        "val/z_acc": vz_acc,
-                        "val/spec_acc": vspec_acc,
-                        "val/masked_spec_acc": vmasked,
-                    },
+                append_metrics(metrics_path, rec)
+                log.info(
+                    "train step %d/%d loss=%.4f loss_z=%.4f loss_spec=%.4f z_acc=%.3f spec_acc=%.3f "
+                    "masked_spec=%.3f grad_norm=%.3f codes_unique=%d lr=%.2e (%.2f step/s)",
                     step,
+                    args.steps,
+                    loss.item(),
+                    lp.get("loss_z", float("nan")),
+                    lp.get("loss_spec", float("nan")),
+                    m["z"],
+                    m["spec"],
+                    ms,
+                    float(grad_norm),
+                    n_unique,
+                    lr,
+                    sps,
                 )
-            unwrap(model).train()
-        step += 1
+                sys.stdout.flush()
+                if wb:
+                    wb_payload = {
+                        "train/loss": loss.item(),
+                        "train/z_acc": m["z"],
+                        "train/spec_acc": m["spec"],
+                        "train/overall_acc": m["overall"],
+                        "train/masked_spec_acc": ms,
+                        "train/spec_codes_unique": n_unique,
+                        "train/lr": lr,
+                        "train/steps_per_sec": sps,
+                        "train/grad_norm": float(grad_norm),
+                        "train/loss_z": lp.get("loss_z", 0.0),
+                        "train/loss_spec": lp.get("loss_spec", 0.0),
+                        "train/perplexity_spec": lp.get("perplexity_spec", 0.0),
+                    }
+                    if "loss_aux_z" in lp:
+                        wb_payload["train/loss_aux_z"] = lp["loss_aux_z"]
+                    log_metrics(wb, wb_payload, step)
+
+            if main_proc and val_every > 0 and step > 0 and step % val_every == 0:
+                log.info("validation step %d ...", step)
+                sys.stdout.flush()
+                unwrap(model).eval()
+                vloss, vn = 0.0, 0
+                vz_acc, vspec_acc, vmasked = 0.0, 0.0, 0.0
+                vloss_z, vloss_spec = 0.0, 0.0
+                with torch.no_grad():
+                    for vb in val_loader:
+                        if vb is None:
+                            continue
+                        si, zi = tokenize_batch(vb, spectrum_tok, z_codec, device)
+                        enc_v, dec_v, tgt_v, vmp = build_sequences(
+                            si, zi, args.approach, args.encoder_mask_ratio
+                        )
+                        lg, ls, vparts = unwrap(model)(
+                            enc_v,
+                            dec_v,
+                            targets=tgt_v,
+                            z_weight=args.z_weight,
+                            aux_z_weight=args.aux_z_weight,
+                            approach=args.approach,
+                        )
+                        vm = accuracy(lg, tgt_v)
+                        vms = masked_spec_accuracy(lg, tgt_v, vmp)
+                        vlp = _loss_parts_float(vparts)
+                        vloss += ls.item()
+                        vz_acc += vm["z"]
+                        vspec_acc += vm["spec"]
+                        vmasked += vms if not math.isnan(vms) else 0.0
+                        vloss_z += vlp.get("loss_z", 0.0)
+                        vloss_spec += vlp.get("loss_spec", 0.0)
+                        vn += 1
+                        if args.val_max_batches > 0 and vn >= args.val_max_batches:
+                            break
+                vloss /= max(vn, 1)
+                vz_acc /= max(vn, 1)
+                vspec_acc /= max(vn, 1)
+                vmasked /= max(vn, 1)
+                vloss_z /= max(vn, 1)
+                vloss_spec /= max(vn, 1)
+                val_rec = {
+                    "kind": "val",
+                    "step": step,
+                    "loss": vloss,
+                    "loss_z": vloss_z,
+                    "loss_spec": vloss_spec,
+                    "perplexity_spec": float(math.exp(min(vloss_spec, 20.0))),
+                    "acc/z": vz_acc,
+                    "acc/spec": vspec_acc,
+                    "acc/masked_spec": vmasked,
+                    "n_batches": vn,
+                    "best_val_loss": min(best_val, vloss),
+                }
+                append_metrics(metrics_path, val_rec)
+                saved = vloss < best_val
+                if saved:
+                    best_val = vloss
+                ckpt = build_checkpoint(model, opt, z_codec, step, best_val, args)
+                save_checkpoint(run_dir / "last.pt", ckpt, log)
+                if saved:
+                    save_checkpoint(run_dir / "best.pt", ckpt, log)
+                log.info(
+                    "val step %d loss=%.4f loss_z=%.4f loss_spec=%.4f z_acc=%.3f spec_acc=%.3f "
+                    "masked_spec=%.3f batches=%d best_val=%.4f%s",
+                    step,
+                    vloss,
+                    vloss_z,
+                    vloss_spec,
+                    vz_acc,
+                    vspec_acc,
+                    vmasked,
+                    vn,
+                    best_val,
+                    " -> saved best.pt" if saved else "",
+                )
+                sys.stdout.flush()
+                if wb:
+                    log_metrics(
+                        wb,
+                        {
+                            "val/loss": vloss,
+                            "val/loss_z": vloss_z,
+                            "val/loss_spec": vloss_spec,
+                            "val/perplexity_spec": val_rec["perplexity_spec"],
+                            "val/z_acc": vz_acc,
+                            "val/spec_acc": vspec_acc,
+                            "val/masked_spec_acc": vmasked,
+                        },
+                        step,
+                    )
+                unwrap(model).train()
+
+            step += 1
+    finally:
+        if main_proc and step > 0:
+            try:
+                save_checkpoint(
+                    run_dir / "last.pt",
+                    build_checkpoint(model, opt, z_codec, step - 1, best_val, args),
+                    log,
+                )
+            except Exception:
+                pass
 
     if main_proc:
         finish(wb)

@@ -246,7 +246,7 @@ python -m torch.distributed.run --nproc_per_node=4 scripts/train_model.py \
   --manifest $NERSC_SCRATCH_ROOT/manifests/dr1_10k_scratch.jsonl \
   --spectrum-tokenizer aion \
   --approach b --run-name p5_approach_b_aion \
-  --steps 10000 --batch-size 8 --num-workers 4 \
+  --steps 10000 --batch-size 8 --num-workers 2 \
   --log-every 10 --val-every 500 --val-max-batches 32 \
   --scratch-out $NERSC_SCRATCH_ROOT/checkpoints \
   --wandb-mode online
@@ -256,7 +256,7 @@ python -m torch.distributed.run --nproc_per_node=4 scripts/train_model.py \
   --manifest $NERSC_SCRATCH_ROOT/manifests/dr1_10k_scratch.jsonl \
   --spectrum-tokenizer aion \
   --approach a --run-name p5_approach_a_aion \
-  --steps 10000 --batch-size 8 --num-workers 4 \
+  --steps 10000 --batch-size 8 --num-workers 2 \
   --log-every 10 --val-every 500 --val-max-batches 32 \
   --scratch-out $NERSC_SCRATCH_ROOT/checkpoints \
   --wandb-mode online
@@ -265,13 +265,27 @@ python -m torch.distributed.run --nproc_per_node=4 scripts/train_model.py \
 **Logs per run:** `$NERSC_SCRATCH_ROOT/checkpoints/<run-name>/train.log` and `metrics.jsonl`  
 (`kind`: `train` every `--log-every` steps, `val` every `--val-every` steps).
 
+**Resume:** Re-run the **same** `--run-name`; training auto-continues from `last.pt` (or `best.pt` if no `last.pt`). Checkpoints include model, optimizer, `z_codec`, and step. Use `--no-resume` to start over. W&B run id is stored in `wandb_id.txt` when online.
+
 ```bash
 tail -f $NERSC_SCRATCH_ROOT/checkpoints/p5_approach_b_aion/train.log
 ```
 
 **Legacy** (desifm `codec_v2` only): add `--spectrum-tokenizer desifm --codec-ckpt $NERSC_SCRATCH_ROOT/deepsrch/checkpoints/codec_v2/best.pt`.
 
-**Note:** AION encode per batch is heavier than a small desifm codec; use `batch-size 4–8` if OOM or low step/s.
+**Note:** AION encode per batch is heavier than a small desifm codec; use `batch-size 4–8` if GPU OOM or low step/s.
+
+**DataLoader OOM (worker `Killed by signal`):** With 4 DDP ranks, `--num-workers 4` means **16** FITS loader processes and can exhaust **host RAM** (Linux OOM killer). Use **`--num-workers 2`** (8 loaders) or **`0`** (slow but safe). Confirm with `dmesg | tail -20 | grep -i kill` on the node.
+
+```bash
+# Safer restart after worker OOM (Approach A example)
+python -m torch.distributed.run --nproc_per_node=4 scripts/train_model.py \
+  --manifest $NERSC_SCRATCH_ROOT/manifests/dr1_10k_scratch.jsonl \
+  --spectrum-tokenizer aion --approach a --run-name p5_approach_a_aion_v2 \
+  --steps 10000 --batch-size 8 --num-workers 2 \
+  --log-every 10 --val-every 500 --val-max-batches 32 \
+  --scratch-out $NERSC_SCRATCH_ROOT/checkpoints --wandb-mode online
+```
 
 ## Local smoke (no FITS, synthetic data)
 
