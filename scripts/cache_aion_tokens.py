@@ -21,17 +21,19 @@ from desifm.training.paths import require_scratch_manifest
 
 
 def setup_logging(rank: int, world_size: int) -> logging.Logger:
-    log = logging.getLogger("cache_aion_tokens")
-    log.setLevel(logging.INFO)
-    if not log.handlers:
-        fmt = logging.Formatter(
-            f"%(asctime)s | rank {rank}/{world_size} | %(levelname)s | %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
-        h = logging.StreamHandler(sys.stdout)
-        h.setFormatter(fmt)
-        log.addHandler(h)
-    return log
+    fmt = logging.Formatter(
+        f"%(asctime)s | rank {rank}/{world_size} | %(levelname)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    if rank == 0:
+        for name in ("cache_aion_tokens", "desifm.tokenization.aion_bridge"):
+            lg = logging.getLogger(name)
+            lg.setLevel(logging.INFO)
+            lg.handlers.clear()
+            h = logging.StreamHandler(sys.stdout)
+            h.setFormatter(fmt)
+            lg.addHandler(h)
+    return logging.getLogger("cache_aion_tokens")
 
 
 def main():
@@ -56,6 +58,11 @@ def main():
         type=int,
         default=256,
         help="Log progress every N spectra encoded per rank (0=only start/end)",
+    )
+    p.add_argument(
+        "--reuse-indices",
+        action="store_true",
+        help="Skip index scan if valid_indices.npy exists in --token-cache",
     )
     args = p.parse_args()
 
@@ -114,6 +121,7 @@ def main():
         rank=rank,
         world_size=world_size,
         log_every=args.log_every,
+        reuse_indices=args.reuse_indices,
         log=log if main_proc else None,
     )
     elapsed = time.perf_counter() - t0

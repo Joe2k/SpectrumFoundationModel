@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ CODES_FILE = "codes.npy"
 Z_FILE = "z.npy"
 HEALPIX_FILE = "healpix.npy"
 META_FILE = "meta.json"
+VALID_INDICES_FILE = "valid_indices.npy"
 
 
 def cache_paths(cache_dir: Path) -> dict[str, Path]:
@@ -108,15 +110,45 @@ def merge_valid_indices(local_parts: list[list[int]]) -> list[int]:
     return sorted(idx for part in local_parts for idx in part)
 
 
+def _dist_barrier(device: torch.device) -> None:
+    import torch.distributed as dist
+
+    if dist.is_initialized():
+        if device.type == "cuda":
+            dist.barrier(device_ids=[device.index])
+        else:
+            dist.barrier()
+
+
+def _write_valid_indices(indices_path: Path, valid: list[int]) -> None:
+    arr = np.array(valid, dtype=np.int64)
+    mmap = np.memmap(indices_path, dtype=np.int64, mode="w+", shape=arr.shape)
+    mmap[:] = arr
+    mmap.flush()
+
+
 def collect_valid_indices(
     ds: DR1StreamDataset,
+    indices_path: Path,
     *,
     rank: int = 0,
     world_size: int = 1,
+    device: torch.device,
     log: Any = None,
-) -> list[int]:
-    """Dataset indices with non-None spectra, in ascending order (DDP-safe)."""
+    reuse_existing: bool = False,
+) -> int:
+    """Scan dataset; write sorted valid row indices to ``indices_path``; return count."""
     import torch.distributed as dist
+
+    if reuse_existing and indices_path.is_file():
+        n_existing = int(np.memmap(indices_path, dtype=np.int64, mode="r").shape[0])
+        if world_size > 1 and dist.is_initialized():
+            n_t = torch.tensor([n_existing], dtype=torch.long, device=device)
+            dist.broadcast(n_t, src=0)
+            n_existing = int(n_t.item())
+        if log is not None and rank == 0:
+            log.info("reusing existing index file %s (n=%d)", indices_path, n_existing)
+        return n_existing
 
     n = len(ds)
     local: list[int] = []
@@ -137,19 +169,59 @@ def collect_valid_indices(
     if world_size > 1 and dist.is_initialized():
         gathered: list[list[int]] = [None] * world_size  # type: ignore[assignment]
         dist.all_gather_object(gathered, local)
-        valid = merge_valid_indices(gathered)
-        if log is not None and rank == 0:
-            log.info(
-                "index scan complete: %d valid / %d rows in %.1fs",
-                len(valid),
-                n,
-                time.perf_counter() - t0,
-            )
-        return valid
+        n_valid = 0
+        if rank == 0:
+            valid = merge_valid_indices(gathered)
+            n_valid = len(valid)
+            _write_valid_indices(indices_path, valid)
+            if log is not None:
+                log.info(
+                    "index scan complete: %d valid / %d rows in %.1fs -> %s",
+                    n_valid,
+                    n,
+                    time.perf_counter() - t0,
+                    indices_path,
+                )
+        _dist_barrier(device)
+        n_t = torch.tensor([0], dtype=torch.long, device=device)
+        if rank == 0:
+            n_t.fill_(n_valid)
+        dist.broadcast(n_t, src=0)
+        return int(n_t.item())
 
+    _write_valid_indices(indices_path, local)
     if log is not None:
         log.info("index scan complete: %d valid / %d rows in %.1fs", len(local), n, time.perf_counter() - t0)
-    return local
+    return len(local)
+
+
+def _warmup_aion(
+    tok: Any,
+    *,
+    rank: int,
+    world_size: int,
+    device: torch.device,
+    log: Any = None,
+) -> None:
+    """Load AION CodecManager one rank at a time (avoids 4× HF hammer on compute nodes)."""
+    import torch.distributed as dist
+
+    for r in range(world_size):
+        if rank == r:
+            if log is not None:
+                log.info(
+                    "rank %d loading AION CodecManager on %s (HF weights — can take several minutes; "
+                    "run scripts/prefetch_aion_codec.py on login node if this stalls)",
+                    rank,
+                    device,
+                )
+            sys.stdout.flush()
+            tok._manager()
+            if log is not None:
+                log.info("rank %d AION CodecManager ready", rank)
+            sys.stdout.flush()
+        if world_size > 1 and dist.is_initialized():
+            _dist_barrier(device)
 
 
 def _init_cache_files(paths: dict[str, Path], n_rows: int) -> None:
@@ -199,6 +271,8 @@ def build_aion_token_cache(
     rank: int = 0,
     world_size: int = 1,
     log_every: int = 256,
+    log_heartbeat_sec: float = 30.0,
+    reuse_indices: bool = False,
     log: Any = None,
 ) -> dict[str, Any]:
     """Encode all valid DR1 spectra once and write memmap arrays under ``cache_dir``.
@@ -229,26 +303,41 @@ def build_aion_token_cache(
         else:
             log.info("CPU index scan (%d rows) — GPU idle until encode starts...", len(ds))
 
-    valid_indices = collect_valid_indices(ds, rank=rank, world_size=world_size, log=log)
-    n_valid = len(valid_indices)
+    indices_path = paths["root"] / VALID_INDICES_FILE
+    n_valid = collect_valid_indices(
+        ds,
+        indices_path,
+        rank=rank,
+        world_size=world_size,
+        device=device,
+        log=log,
+        reuse_existing=reuse_indices,
+    )
     n_skipped = len(ds) - n_valid
     if n_valid == 0:
         raise RuntimeError("no valid spectra in manifest — check FITS paths")
 
     if rank == 0:
+        codes_mb = n_valid * N_LATENT_TOKENS * 2 / (1024**3)
         if log is not None:
-            log.info("allocating cache for %d spectra (skipped %d)", n_valid, n_skipped)
+            log.info(
+                "allocating cache for %d spectra (skipped %d, codes ~%.2f GiB on scratch)...",
+                n_valid,
+                n_skipped,
+                codes_mb,
+            )
         _init_cache_files(paths, n_valid)
+        if log is not None:
+            log.info("cache memmap files created")
 
-    if world_size > 1 and dist.is_initialized():
-        dist.barrier()
+    _dist_barrier(device)
 
     codes_mmap = np.memmap(paths["codes"], dtype=np.uint16, mode="r+", shape=(n_valid, N_LATENT_TOKENS))
     z_mmap = np.memmap(paths["z"], dtype=np.float32, mode="r+", shape=(n_valid,))
     hp_mmap = np.memmap(paths["healpix"], dtype=np.int32, mode="r+", shape=(n_valid,))
-
-    my_indices = valid_indices[rank::world_size]
-    n_assigned = len(my_indices)
+    idx_mmap = np.memmap(indices_path, dtype=np.int64, mode="r", shape=(n_valid,))
+    my_indices = idx_mmap[rank::world_size]
+    n_assigned = int(my_indices.shape[0])
 
     if log is not None and rank == 0:
         per_rank = (n_valid + world_size - 1) // world_size if world_size > 0 else n_valid
@@ -260,17 +349,19 @@ def build_aion_token_cache(
             device,
         )
 
-    if log is not None and rank == 0:
-        log.info("loading AION on %s — GPU encode starting", device)
     tok = AionSpectrumTokenizer(device, hf_repo=aion_hf_repo)
+    _warmup_aion(tok, rank=rank, world_size=world_size, device=device, log=log)
+
     pending: list[dict] = []
     pending_hp: list[int] = []
     pending_rows: list[int] = []
     local_written = 0
     t0 = time.perf_counter()
+    last_heartbeat = t0
+    first_encode = True
 
     def flush_pending() -> None:
-        nonlocal local_written
+        nonlocal local_written, last_heartbeat, first_encode
         if not pending:
             return
         batch = collate_spectra(pending)
@@ -279,7 +370,14 @@ def build_aion_token_cache(
             pending_hp.clear()
             pending_rows.clear()
             return
+        if log is not None and rank == 0 and first_encode:
+            log.info("GPU encode: first batch (%d spectra) — loading HF codec if needed...", len(pending))
+            sys.stdout.flush()
         codes, _meta = tok.encode_batch(batch)
+        if log is not None and rank == 0 and first_encode:
+            log.info("GPU encode: first batch done")
+            sys.stdout.flush()
+            first_encode = False
         b = codes.shape[0]
         rows = np.array(pending_rows, dtype=np.int64)
         codes_mmap[rows] = codes.cpu().numpy().astype(np.uint16)
@@ -312,7 +410,18 @@ def build_aion_token_cache(
                 force=local_written == n_assigned,
             )
 
-    for j, ds_idx in enumerate(my_indices):
+    for j in range(n_assigned):
+        ds_idx = int(my_indices[j])
+        now = time.perf_counter()
+        if log is not None and rank == 0 and (j == 0 or now - last_heartbeat >= log_heartbeat_sec):
+            log.info(
+                "encode prep: read %d / %d rows on rank 0 (pending batch %d)",
+                j + 1,
+                n_assigned,
+                len(pending),
+            )
+            sys.stdout.flush()
+            last_heartbeat = now
         item = ds[ds_idx]
         if item is None:
             continue
@@ -330,7 +439,7 @@ def build_aion_token_cache(
     hp_mmap.flush()
 
     if world_size > 1 and dist.is_initialized():
-        dist.barrier()
+        _dist_barrier(device)
         total_written = torch.tensor([local_written], dtype=torch.long, device=device)
         dist.all_reduce(total_written, op=dist.ReduceOp.SUM)
         if int(total_written.item()) != n_valid:
@@ -365,7 +474,6 @@ def build_aion_token_cache(
                 n_valid / max(elapsed, 1e-6),
             )
 
-    if world_size > 1 and dist.is_initialized():
-        dist.barrier()
+    _dist_barrier(device)
 
     return meta

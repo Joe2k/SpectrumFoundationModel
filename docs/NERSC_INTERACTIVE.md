@@ -228,7 +228,11 @@ python -m torch.distributed.run --nproc_per_node=4 scripts/train_model.py \
   --scratch-out $NERSC_SCRATCH_ROOT/checkpoints --wandb-mode online
 ```
 
-Cache layout: `codes.npy`, `z.npy`, `healpix.npy`, `meta.json` under `--token-cache`.
+Cache layout: `codes.npy`, `z.npy`, `healpix.npy`, `valid_indices.npy`, `meta.json` under `--token-cache`.
+
+**Stuck after `loading AION` / GPU 0%?** Not hung — first HF codec load + FITS read for batch 1 can take **5–30+ minutes** with no `cached X/Y` line yet. Prefetch on login node: `.venv/bin/python scripts/prefetch_aion_codec.py`. If index scan already finished, restart encode only: add `--reuse-indices` (reuses `valid_indices.npy`).
+
+**Scale:** `dr1_1k_scratch` can still be **~1M+ fiber rows** per tile (~1.1M valid in a full run). Full cache encode is **many hours**; use `--max-spectra 5000` for a smoke test.
 
 ## Train model (4 GPU DDP, official AION spectrum tokenizer)
 
