@@ -235,23 +235,38 @@ Logs: `$NERSC_SCRATCH_ROOT/checkpoints/smoke_aion_dr1_1k/smoke.log` and `metrics
 
 If stuck >10 min at HF load: `Ctrl+C`, run `prefetch_aion_codec.py` on login node, retry.
 
+```bash
 # Transformer smoke (~30 steps)
-python scripts/train_model.py --synthetic --smoke --spectrum-tokenizer aion \
-  --approach b --run-name p5_smoke_b_aion --wandb-mode online
+.venv/bin/python scripts/train_model.py --synthetic --smoke --spectrum-tokenizer aion \
+  --approach b --run-name p5_smoke_b_aion \
+  --scratch-out $NERSC_SCRATCH_ROOT/checkpoints --wandb-mode online
 
 # Production — Approach B first (assignment focus)
 python -m torch.distributed.run --nproc_per_node=4 scripts/train_model.py \
   --manifest $NERSC_SCRATCH_ROOT/manifests/dr1_10k_scratch.jsonl \
   --spectrum-tokenizer aion \
   --approach b --run-name p5_approach_b_aion \
-  --steps 10000 --batch-size 8 --wandb-mode online
+  --steps 10000 --batch-size 8 --num-workers 4 \
+  --log-every 10 --val-every 500 \
+  --scratch-out $NERSC_SCRATCH_ROOT/checkpoints \
+  --wandb-mode online
 
 # Approach A (if time)
 python -m torch.distributed.run --nproc_per_node=4 scripts/train_model.py \
   --manifest $NERSC_SCRATCH_ROOT/manifests/dr1_10k_scratch.jsonl \
   --spectrum-tokenizer aion \
   --approach a --run-name p5_approach_a_aion \
-  --steps 10000 --batch-size 8 --wandb-mode online
+  --steps 10000 --batch-size 8 --num-workers 4 \
+  --log-every 10 --val-every 500 \
+  --scratch-out $NERSC_SCRATCH_ROOT/checkpoints \
+  --wandb-mode online
+```
+
+**Logs per run:** `$NERSC_SCRATCH_ROOT/checkpoints/<run-name>/train.log` and `metrics.jsonl`  
+(`kind`: `train` every `--log-every` steps, `val` every `--val-every` steps).
+
+```bash
+tail -f $NERSC_SCRATCH_ROOT/checkpoints/p5_approach_b_aion/train.log
 ```
 
 **Legacy** (desifm `codec_v2` only): add `--spectrum-tokenizer desifm --codec-ckpt $NERSC_SCRATCH_ROOT/deepsrch/checkpoints/codec_v2/best.pt`.

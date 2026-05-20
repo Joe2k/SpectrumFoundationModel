@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 import sys
+import time
 from pathlib import Path
 
 import torch
@@ -33,6 +35,26 @@ from desifm.training.metrics import accuracy, masked_spec_accuracy
 from desifm.training.env import load_project_env
 from desifm.training.paths import require_scratch_manifest, scratch_root
 from desifm.training.wandb_log import finish, init_run, log_metrics
+
+
+def setup_logging(run_dir: Path) -> logging.Logger:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log = logging.getLogger("train_model")
+    log.setLevel(logging.INFO)
+    log.handlers.clear()
+    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+    log.addHandler(sh)
+    fh = logging.FileHandler(run_dir / "train.log")
+    fh.setFormatter(fmt)
+    log.addHandler(fh)
+    return log
+
+
+def append_metrics(path: Path, record: dict) -> None:
+    with path.open("a") as f:
+        f.write(json.dumps(record) + "\n")
 
 
 def lr_schedule(step: int, base: float, warmup: int, total: int) -> float:
@@ -92,6 +114,8 @@ def main():
     p.add_argument("--encoder-mask-ratio", type=float, default=0.5)
     p.add_argument("--d-model", type=int, default=512)
     p.add_argument("--wandb-mode", default="online")
+    p.add_argument("--log-every", type=int, default=10, help="Log train metrics every N steps")
+    p.add_argument("--val-every", type=int, default=0, help="Run validation every N steps (0 = auto)")
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--synthetic", action="store_true", help="Use random spectra (no FITS/manifest)")
     args = p.parse_args()
@@ -118,6 +142,8 @@ def main():
         args.steps, args.batch_size, args.d_model = 30, 2, 128
         args.synthetic = True
         args.num_workers = 0
+        args.log_every = 5
+        args.val_every = 10
 
     if args.synthetic:
         train_ds = SyntheticSpectrumDataset(n_spectra=400, seed=42)
@@ -160,9 +186,27 @@ def main():
 
     out_root = args.scratch_out or scratch_root() / "checkpoints"
     run_dir = out_root / args.run_name
-    if main_proc:
-        run_dir.mkdir(parents=True, exist_ok=True)
+    log = setup_logging(run_dir) if main_proc else logging.getLogger("train_model")
+    log.setLevel(logging.INFO)
     metrics_path = run_dir / "metrics.jsonl"
+    val_every = args.val_every if args.val_every > 0 else max(args.log_every, args.steps // 5)
+
+    if main_proc:
+        log.info("=== DesiFoundationModel approach %s ===", args.approach)
+        log.info("run_dir=%s", run_dir)
+        log.info(
+            "spectrum_tokenizer=%s steps=%d batch_size=%d num_workers=%d d_model=%d device=%s world_size=%d",
+            args.spectrum_tokenizer,
+            args.steps,
+            args.batch_size,
+            args.num_workers,
+            args.d_model,
+            device,
+            world_size,
+        )
+        log.info("manifest=%s", args.manifest if not args.synthetic else "(synthetic)")
+        log.info("log_every=%d val_every=%d metrics=%s train.log=%s", args.log_every, val_every, metrics_path, run_dir / "train.log")
+        sys.stdout.flush()
 
     if args.spectrum_tokenizer == "aion":
         spectrum_tok = AionSpectrumTokenizer(device, hf_repo=args.aion_hf_repo)
@@ -206,6 +250,7 @@ def main():
     step, best_val = 0, float("inf")
     train_it = iter(train_loader)
     warmup = min(200, max(1, args.steps // 5))
+    t0 = time.perf_counter()
 
     while step < args.steps:
         if train_sampler is not None:
@@ -237,21 +282,37 @@ def main():
         torch.nn.utils.clip_grad_norm_(unwrap(model).parameters(), 1.0)
         opt.step()
 
-        if main_proc and step % 20 == 0:
+        if main_proc and step % args.log_every == 0:
             m = accuracy(logits.detach(), tgt)
             ms = masked_spec_accuracy(logits.detach(), tgt, mask_pos)
             n_unique = int(spec_idx.unique().numel())
+            lr = opt.param_groups[0]["lr"]
+            sps = (step + 1) / max(time.perf_counter() - t0, 1e-6)
             rec = {
                 "kind": "train",
                 "step": step,
                 "loss": loss.item(),
+                "lr": lr,
+                "steps_per_sec": sps,
                 "spectrum_tokenizer": args.spectrum_tokenizer,
                 "spec_codes_unique": n_unique,
                 **{f"acc/{k}": v for k, v in m.items()},
                 "acc/masked_spec": ms,
             }
-            with metrics_path.open("a") as f:
-                f.write(json.dumps(rec) + "\n")
+            append_metrics(metrics_path, rec)
+            log.info(
+                "train step %d/%d loss=%.4f z_acc=%.3f spec_acc=%.3f masked_spec=%.3f codes_unique=%d lr=%.2e (%.2f step/s)",
+                step,
+                args.steps,
+                loss.item(),
+                m["z"],
+                m["spec"],
+                ms,
+                n_unique,
+                lr,
+                sps,
+            )
+            sys.stdout.flush()
             if wb:
                 log_metrics(
                     wb,
@@ -259,14 +320,20 @@ def main():
                         "train/loss": loss.item(),
                         "train/z_acc": m["z"],
                         "train/spec_acc": m["spec"],
+                        "train/masked_spec_acc": ms,
                         "train/spec_codes_unique": n_unique,
+                        "train/lr": lr,
+                        "train/steps_per_sec": sps,
                     },
                     step,
                 )
 
-        if main_proc and step > 0 and step % max(20, args.steps // 3) == 0:
+        if main_proc and step > 0 and step % val_every == 0:
+            log.info("validation step %d ...", step)
+            sys.stdout.flush()
             unwrap(model).eval()
             vloss, vn = 0.0, 0
+            vz_acc, vspec_acc = 0.0, 0.0
             with torch.no_grad():
                 for vb in val_loader:
                     if vb is None:
@@ -275,7 +342,7 @@ def main():
                     enc_v, dec_v, tgt_v, _mp = build_sequences(
                         si, zi, args.approach, args.encoder_mask_ratio
                     )
-                    _lg, ls = unwrap(model)(
+                    lg, ls = unwrap(model)(
                         enc_v,
                         dec_v,
                         targets=tgt_v,
@@ -283,10 +350,26 @@ def main():
                         aux_z_weight=args.aux_z_weight,
                         approach=args.approach,
                     )
+                    vm = accuracy(lg, tgt_v)
                     vloss += ls.item()
+                    vz_acc += vm["z"]
+                    vspec_acc += vm["spec"]
                     vn += 1
             vloss /= max(vn, 1)
-            if vloss < best_val:
+            vz_acc /= max(vn, 1)
+            vspec_acc /= max(vn, 1)
+            val_rec = {
+                "kind": "val",
+                "step": step,
+                "loss": vloss,
+                "acc/z": vz_acc,
+                "acc/spec": vspec_acc,
+                "n_batches": vn,
+                "best_val_loss": min(best_val, vloss),
+            }
+            append_metrics(metrics_path, val_rec)
+            saved = vloss < best_val
+            if saved:
                 best_val = vloss
                 torch.save(
                     {
@@ -298,14 +381,34 @@ def main():
                     },
                     run_dir / "best.pt",
                 )
+            log.info(
+                "val step %d loss=%.4f z_acc=%.3f spec_acc=%.3f batches=%d best_val=%.4f%s",
+                step,
+                vloss,
+                vz_acc,
+                vspec_acc,
+                vn,
+                best_val,
+                " -> saved best.pt" if saved else "",
+            )
+            sys.stdout.flush()
             if wb:
-                log_metrics(wb, {"val/loss": vloss}, step)
+                log_metrics(
+                    wb,
+                    {
+                        "val/loss": vloss,
+                        "val/z_acc": vz_acc,
+                        "val/spec_acc": vspec_acc,
+                    },
+                    step,
+                )
             unwrap(model).train()
         step += 1
 
     if main_proc:
         finish(wb)
-        print(f"done {args.run_name} best_val={best_val:.4f} -> {run_dir}")
+        log.info("=== done === best_val=%.4f -> %s", best_val, run_dir)
+        print(f"done {args.run_name} best_val={best_val:.4f} -> {run_dir}", flush=True)
     cleanup_distributed()
 
 
