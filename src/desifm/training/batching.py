@@ -33,7 +33,7 @@ def tokenize_batch(
         else:
             x, denorm, _ = prepare_codec_batch(batch)
             spec_idx, _ = spectrum_tok.encode(x, denorm)
-    z_idx = torch.tensor([z_codec.encode(float(z)) for z in batch["z"]], device=device, dtype=torch.long)
+    z_idx = z_codec.encode_batch(batch["z"]).to(device=device, dtype=torch.long)
     return spec_idx, z_idx
 
 

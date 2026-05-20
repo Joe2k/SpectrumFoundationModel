@@ -20,12 +20,13 @@ class RedshiftCodec:
         return self._sorted_z is not None
 
     def fit(self, z_values: torch.Tensor) -> None:
-        z = z_values.detach().float().flatten()
+        z = z_values.detach().float().flatten().cpu()
         self._sorted_z = torch.sort(z)[0]
 
     def _cdf(self, z: torch.Tensor) -> torch.Tensor:
         assert self._sorted_z is not None
-        idx = torch.searchsorted(self._sorted_z, z.flatten())
+        z_cpu = z.detach().float().flatten().cpu()
+        idx = torch.searchsorted(self._sorted_z, z_cpu)
         p = idx.float() / len(self._sorted_z)
         return p.clamp(1e-6, 1 - 1e-6).reshape(z.shape)
 
@@ -44,14 +45,22 @@ class RedshiftCodec:
     def _from_gaussian(g: torch.Tensor) -> torch.Tensor:
         return 0.5 * (1 + torch.erf(g / (2**0.5)))
 
+    def encode_batch(self, z: torch.Tensor) -> torch.Tensor:
+        """Vectorized encode; always runs on CPU (small lookup table)."""
+        if not self.fitted:
+            raise RuntimeError("RedshiftCodec.fit() required before encode()")
+        shape = z.shape
+        t = z.detach().float().reshape(-1).cpu()
+        g = self._to_gaussian(self._cdf(t))
+        bin_idx = ((g + self.gaussian_clip) / (2 * self.gaussian_clip) * (self.n_bins - 1)).long()
+        return bin_idx.clamp(0, self.n_bins - 1).reshape(shape)
+
     def encode(self, z: float | torch.Tensor) -> int | torch.Tensor:
         if not self.fitted:
             raise RuntimeError("RedshiftCodec.fit() required before encode()")
-        t = torch.as_tensor(z, dtype=torch.float32)
-        g = self._to_gaussian(self._cdf(t))
-        bin_idx = ((g + self.gaussian_clip) / (2 * self.gaussian_clip) * (self.n_bins - 1)).long()
-        bin_idx = bin_idx.clamp(0, self.n_bins - 1)
-        return int(bin_idx.item()) if t.numel() == 1 else bin_idx
+        t = torch.as_tensor(z, dtype=torch.float32, device="cpu")
+        out = self.encode_batch(t)
+        return int(out.item()) if out.numel() == 1 else out
 
     def decode(self, bin_idx: int | torch.Tensor) -> float | torch.Tensor:
         if not self.fitted:
@@ -66,6 +75,7 @@ class RedshiftCodec:
         return {"sorted_z": self._sorted_z, "n_bins": self.n_bins, "gaussian_clip": self.gaussian_clip}
 
     def load_state_dict(self, state: dict) -> None:
-        self._sorted_z = state["sorted_z"]
+        sz = state["sorted_z"]
+        self._sorted_z = sz.cpu() if sz is not None else None
         self.n_bins = state["n_bins"]
         self.gaussian_clip = state["gaussian_clip"]
