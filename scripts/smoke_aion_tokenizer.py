@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import json
+import logging
 import sys
+import time
 from pathlib import Path
 
 import torch
@@ -16,6 +19,22 @@ from desifm.data.dr1_stream import DR1StreamDataset, collate_spectra, load_manif
 from desifm.data.synthetic import SyntheticSpectrumDataset
 from desifm.tokenization.aion_bridge import AionSpectrumTokenizer
 from desifm.training.env import load_project_env
+from desifm.training.paths import scratch_root
+
+
+def setup_logging(run_dir: Path) -> logging.Logger:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log = logging.getLogger("smoke_aion")
+    log.setLevel(logging.INFO)
+    log.handlers.clear()
+    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+    log.addHandler(sh)
+    fh = logging.FileHandler(run_dir / "smoke.log")
+    fh.setFormatter(fmt)
+    log.addHandler(fh)
+    return log
 
 
 def main():
@@ -25,15 +44,35 @@ def main():
     p.add_argument("--manifest", type=Path, default=None)
     p.add_argument("--batch-size", type=int, default=2)
     p.add_argument("--device", default="cpu")
+    p.add_argument("--run-name", default="smoke_aion_tokenizer")
+    p.add_argument(
+        "--scratch-out",
+        type=Path,
+        default=None,
+        help="Log directory root (default: $SCRATCH/checkpoints or ./checkpoints)",
+    )
     args = p.parse_args()
 
+    out_root = args.scratch_out or scratch_root() / "checkpoints"
+    run_dir = out_root / args.run_name
+    log = setup_logging(run_dir)
+    log.info("=== AION spectrum tokenizer smoke ===")
+    log.info("run_dir=%s", run_dir)
+    log.info("device=%s batch_size=%d synthetic=%s", args.device, args.batch_size, args.synthetic)
+    if args.manifest:
+        log.info("manifest=%s", args.manifest)
+    sys.stdout.flush()
+
+    t0 = time.time()
     if args.synthetic:
+        log.info("building synthetic batch (length=4096)...")
         ds = SyntheticSpectrumDataset(n_spectra=max(4, args.batch_size), length=4096)
         items = [ds[i] for i in range(args.batch_size)]
         batch = collate_spectra(items)
     else:
         if args.manifest is None:
             raise SystemExit("--manifest required unless --synthetic")
+        log.info("loading manifest %s ...", args.manifest)
         records = load_manifest(args.manifest)
         ds = DR1StreamDataset(records, max_spectra=args.batch_size * 4)
         items = []
@@ -46,18 +85,49 @@ def main():
         if len(items) < 1:
             raise SystemExit("no valid spectra from manifest")
         batch = collate_spectra(items)
+        log.info("loaded %d spectra from manifest", len(items))
+
+    log.info(
+        "batch shapes flux=%s wavelength=%s",
+        tuple(batch["flux"].shape),
+        tuple(batch["wavelength"].shape),
+    )
+    log.info("initializing AION CodecManager (first run downloads HF weights; may take 1–3 min)...")
+    sys.stdout.flush()
 
     device = torch.device(args.device)
     tok = AionSpectrumTokenizer(device)
+    t_enc0 = time.time()
     spec_idx, meta = tok.encode_batch(batch)
+    encode_sec = time.time() - t_enc0
 
-    print(f"shape={tuple(spec_idx.shape)} (expected B,{N_LATENT_TOKENS})")
-    print(f"min={int(spec_idx.min())} max={int(spec_idx.max())} (codes 0..{N_SPECTRUM_CODES - 1})")
-    print(f"n_unique={int(spec_idx.unique().numel())}")
-    print(f"meta={meta}")
+    n_unique = int(spec_idx.unique().numel())
+    record = {
+        "shape": list(spec_idx.shape),
+        "min": int(spec_idx.min()),
+        "max": int(spec_idx.max()),
+        "n_unique": n_unique,
+        "meta": meta,
+        "encode_sec": round(encode_sec, 3),
+        "total_sec": round(time.time() - t0, 3),
+        "device": str(device),
+        "synthetic": args.synthetic,
+    }
+    metrics_path = run_dir / "metrics.jsonl"
+    with metrics_path.open("a") as f:
+        f.write(json.dumps(record) + "\n")
+
+    log.info("shape=%s (expected B,%d)", tuple(spec_idx.shape), N_LATENT_TOKENS)
+    log.info("min=%d max=%d (codes 0..%d)", int(spec_idx.min()), int(spec_idx.max()), N_SPECTRUM_CODES - 1)
+    log.info("n_unique=%d meta=%s", n_unique, meta)
+    log.info("encode_time=%.2fs total_time=%.2fs", encode_sec, record["total_sec"])
+    log.info("wrote %s", metrics_path)
+    log.info("wrote %s", run_dir / "smoke.log")
+
     assert spec_idx.shape[1] == N_LATENT_TOKENS
     assert spec_idx.max() < N_SPECTRUM_CODES
-    print("OK")
+    log.info("OK")
+    print(f"OK -> {run_dir}", flush=True)
 
 
 if __name__ == "__main__":

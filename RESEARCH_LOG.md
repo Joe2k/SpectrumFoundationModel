@@ -306,7 +306,7 @@ python scripts/train_codec.py \
 
 - `src/desifm/tokenization/aion_bridge.py` — `AionSpectrumTokenizer`
 - `src/desifm/tokenization/aion_grid.py` — resample to `GRID_SIZE=8704` when needed
-- `scripts/smoke_aion_tokenizer.py` — encode smoke
+- `scripts/smoke_aion_tokenizer.py` — encode smoke; writes `smoke.log` + `metrics.jsonl` under `--scratch-out/<run-name>/`
 - Optional extra: `pip install -e ".[dev,aion]"` (includes `safetensors`)
 
 ### HF

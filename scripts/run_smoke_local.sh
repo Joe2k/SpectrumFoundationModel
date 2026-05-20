@@ -33,7 +33,7 @@ if [[ "${SMOKE_DESIFM_CODEC:-0}" == "1" ]]; then
 fi
 
 echo "== AION spectrum tokenizer encode smoke =="
-"$PYTHON" "${ROOT}/scripts/smoke_aion_tokenizer.py" --synthetic
+"$PYTHON" "${ROOT}/scripts/smoke_aion_tokenizer.py" --synthetic --scratch-out "$OUT"
 
 echo "== approach A (AION tokenizer) =="
 "$PYTHON" "${ROOT}/scripts/train_model.py" \

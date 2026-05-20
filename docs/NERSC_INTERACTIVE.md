@@ -205,7 +205,11 @@ python scripts/train_codec.py \
 
 ```bash
 # Encode smoke (1 process)
-python scripts/smoke_aion_tokenizer.py --synthetic
+.venv/bin/python scripts/smoke_aion_tokenizer.py --synthetic \
+  --scratch-out $NERSC_SCRATCH_ROOT/checkpoints
+# Logs: $NERSC_SCRATCH_ROOT/checkpoints/smoke_aion_tokenizer/smoke.log
+#       $NERSC_SCRATCH_ROOT/checkpoints/smoke_aion_tokenizer/metrics.jsonl
+# First run may sit silent 1–3 min while HF downloads aion-base codec weights.
 
 # Transformer smoke (~30 steps)
 python scripts/train_model.py --synthetic --smoke --spectrum-tokenizer aion \
