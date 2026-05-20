@@ -100,10 +100,11 @@ class LFQuantizerV5(nn.Module):
         z = self.project_in(z)
         z_q = torch.sign(z)
         z_q = z + (z_q - z).detach()
-        commit = F.mse_loss(z, z_q.detach()) * self.commitment_weight
+        # Match FM V2 / desifm v4: commitment + β·codebook (not unweighted codebook).
+        commit = F.mse_loss(z_q.detach(), z)
         codebook = F.mse_loss(z_q, z.detach())
         indices = self._indices(z_q)
-        return z_q, commit + codebook, indices
+        return z_q, commit + self.commitment_weight * codebook, indices
 
     def decode(self, indices: torch.Tensor) -> torch.Tensor:
         b, length = indices.shape
@@ -249,8 +250,7 @@ class SpectrumCodecV5(nn.Module):
         x = self._resize(x)
         h, skips = self._encode(x)
         z_q, q_loss, indices = self.quant(h)
-        indices = self._pad_indices(indices)
-        recon = self._decode(indices, skips)
+        recon = self._decode(self._pad_indices(indices), skips)
         loss_mask = align_mask_to_length(mask, recon.shape[-1])
 
         recon_phys = denormalize_spectrum_output(recon, denorm)
@@ -258,6 +258,7 @@ class SpectrumCodecV5(nn.Module):
         phys_loss = masked_recon_loss(recon_phys[:, 0], target_phys[:, 0], loss_mask)
         arcsinh_loss = masked_recon_loss(recon[:, 0], x[:, 0], loss_mask)
 
+        # Entropy on real latent positions only (before index padding to N_LATENT_TOKENS).
         if use_batch_entropy and lambda_entropy > 0:
             ent_loss = batch_codebook_entropy_loss(indices, n_bins=self.quant.n_codes)
         elif lambda_entropy > 0:
@@ -278,7 +279,7 @@ class SpectrumCodecV5(nn.Module):
         return {
             "recon": recon,
             "loss": total,
-            "indices": indices,
+            "indices": self._pad_indices(indices),
             "recon_loss": recon_loss,
             "arcsinh_loss": arcsinh_loss,
             "q_loss": q_loss,

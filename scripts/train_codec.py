@@ -29,6 +29,7 @@ from desifm.training.codec_input import (
     prepare_codec_batch_v4,
 )
 from desifm.training.codec_loss import (
+    code_usage_passes_gate,
     code_usage_stats,
     flux_rms,
     flux_std_ratio,
@@ -114,6 +115,7 @@ def run_validation(
         "std_ratio_per_spec_median": 0.0,
         "n_unique_codes": 0.0,
         "code_usage_fraction": 0.0,
+        "code_usage_fraction_gate": 0.0,
     }
     per_spec_ratios: list[float] = []
     fwd_extra = model_forward_kw(codec_version)
@@ -144,6 +146,7 @@ def run_validation(
         )
         totals["n_unique_codes"] += float(usage["n_unique"])
         totals["code_usage_fraction"] += float(usage["usage_fraction"])
+        totals["code_usage_fraction_gate"] += float(usage["usage_fraction_gate"])
         per_spec_ratios.extend(
             flux_std_ratio_per_sample(out["recon_phys"], out["target_phys"], mask_g).tolist()
         )
@@ -344,7 +347,12 @@ def main():
         if args.lambda_phys == 0.0:
             args.lambda_phys = 0.5
         if args.lambda_entropy == 0.0:
-            args.lambda_entropy = 0.75 if args.codec_version in ("v5a", "v5") else 0.1
+            if args.codec_version == "v5":
+                args.lambda_entropy = 1.5
+            elif args.codec_version == "v5a":
+                args.lambda_entropy = 0.75
+            else:
+                args.lambda_entropy = 0.1
     commitment = args.commitment_weight
     if commitment is None:
         commitment = 0.05 if args.codec_version in ("v4", "v5a", "v5") else 0.25
@@ -490,11 +498,15 @@ def main():
         if metric >= best_metric:
             return
         if val_stats is not None and args.min_code_usage_fraction > 0:
-            if val_stats.get("code_usage_fraction", 0.0) < args.min_code_usage_fraction:
+            n_codes_gate = int(val_stats.get("n_codes", 256))
+            n_unique = float(val_stats.get("n_unique_codes", 0))
+            if not code_usage_passes_gate(n_unique, n_codes_gate, args.min_code_usage_fraction):
                 if main_proc and log:
                     log.info(
-                        "skip checkpoint: code_usage=%.3f < %.3f",
-                        val_stats["code_usage_fraction"],
+                        "skip checkpoint: unique=%.0f / gate_bins=%d (%.3f) < %.3f",
+                        n_unique,
+                        min(n_codes_gate, 256),
+                        val_stats.get("usage_fraction_gate", 0.0),
                         args.min_code_usage_fraction,
                     )
                 return
@@ -663,15 +675,20 @@ def main():
                 if (
                     delay_phys
                     and not phys_unlocked
-                    and val_stats["code_usage_fraction"] >= args.min_code_usage_fraction
+                    and code_usage_passes_gate(
+                        val_stats["n_unique_codes"],
+                        int(val_stats.get("n_codes", 256)),
+                        args.min_code_usage_fraction,
+                    )
                 ):
                     phys_unlocked = True
                     phys_ramp_origin = step
                     log.info(
-                        "λ_phys unlocked at step %d (code_usage=%.3f ≥ %.3f); "
+                        "λ_phys unlocked at step %d (unique=%.0f, gate_frac=%.3f ≥ %.3f); "
                         "ramp %d steps to target %.3f",
                         step,
-                        val_stats["code_usage_fraction"],
+                        val_stats["n_unique_codes"],
+                        val_stats.get("code_usage_fraction_gate", 0.0),
                         args.min_code_usage_fraction,
                         args.lambda_phys_ramp_steps,
                         args.lambda_phys,
@@ -701,6 +718,7 @@ def main():
                         "val/std_ratio_per_spec_median": val_stats["std_ratio_per_spec_median"],
                         "val/n_unique_codes": val_stats["n_unique_codes"],
                         "val/code_usage_fraction": val_stats["code_usage_fraction"],
+                        "val/code_usage_fraction_gate": val_stats.get("code_usage_fraction_gate", 0.0),
                         "val/q_loss": val_stats["q"],
                         "val/entropy_penalty": val_stats["entropy"],
                     },

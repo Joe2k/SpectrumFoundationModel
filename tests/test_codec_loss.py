@@ -24,6 +24,14 @@ def test_entropy_penalty_collapsed_low():
     assert latent_index_entropy_penalty(indices).item() > 0.9
 
 
+def test_code_usage_gate_bins_v5():
+    from desifm.training.codec_loss import code_usage_gate_bins, code_usage_passes_gate
+
+    assert code_usage_gate_bins(1024) == 256
+    assert code_usage_passes_gate(77, 1024, 0.3)
+    assert not code_usage_passes_gate(60, 1024, 0.3)
+
+
 def test_code_usage_stats_empty():
     stats = code_usage_stats(torch.zeros(0, dtype=torch.long), n_codes=256)
     assert stats["n_unique"] == 0

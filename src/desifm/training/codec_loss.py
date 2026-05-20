@@ -62,6 +62,16 @@ def batch_codebook_entropy_loss(indices: torch.Tensor, n_bins: int = 256) -> tor
     return ((max_ent - entropy) / max_ent).clamp(min=0.0, max=1.0)
 
 
+def code_usage_gate_bins(n_codes: int) -> int:
+    """Tier-1 gate uses 30% of 256 codes (8-bit LFQ), even when model has 10-bit (1024) indices."""
+    return min(int(n_codes), 256)
+
+
+def code_usage_passes_gate(n_unique: float, n_codes: int, min_fraction: float) -> bool:
+    """True when at least ``min_fraction`` of the 256-code Tier-1 gate is used."""
+    return float(n_unique) >= min_fraction * code_usage_gate_bins(n_codes)
+
+
 def code_usage_stats(indices: torch.Tensor, n_codes: int = 256) -> dict[str, float | int | list[tuple[int, int]]]:
     """Summarize LFQ index usage for one forward pass (batch)."""
     flat = indices.reshape(-1)
@@ -70,8 +80,11 @@ def code_usage_stats(indices: torch.Tensor, n_codes: int = 256) -> dict[str, flo
         return {
             "n_unique": 0,
             "n_codes": n_codes,
+            "gate_bins": code_usage_gate_bins(n_codes),
             "usage_fraction": 0.0,
+            "usage_fraction_gate": 0.0,
             "entropy_penalty": 1.0,
+            "batch_entropy_penalty": 1.0,
             "top_codes": [],
             "per_row_n_unique": [],
         }
@@ -92,10 +105,13 @@ def code_usage_stats(indices: torch.Tensor, n_codes: int = 256) -> dict[str, flo
     for b in range(indices.shape[0]):
         row = indices[b].reshape(-1)
         per_row.append(float(len(torch.unique(row))))
+    gate_bins = code_usage_gate_bins(n_codes)
     return {
         "n_unique": n_unique,
         "n_codes": n_codes,
+        "gate_bins": gate_bins,
         "usage_fraction": n_unique / max(n_codes, 1),
+        "usage_fraction_gate": n_unique / max(gate_bins, 1),
         "entropy_penalty": float(latent_index_entropy_penalty(indices, n_bins=n_codes).item()),
         "batch_entropy_penalty": float(batch_codebook_entropy_loss(indices, n_bins=n_codes).item()),
         "top_codes": top_codes,
