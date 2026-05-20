@@ -91,6 +91,17 @@ def main():
     args = p.parse_args()
     load_project_env()
 
+    if args.spectrum_tokenizer == "aion":
+        try:
+            import aion  # noqa: F401
+        except ImportError:
+            raise SystemExit(
+                "Missing package 'aion' (install polymathic-aion). On NERSC run:\n"
+                "  bash scripts/bootstrap_venv.sh\n"
+                "  # or: .venv/bin/pip install -e .\n"
+                "  .venv/bin/python -c \"import aion; print('ok')\""
+            )
+
     if args.spectrum_tokenizer == "desifm" and args.codec_ckpt is None:
         raise SystemExit("--codec-ckpt required when --spectrum-tokenizer desifm")
 

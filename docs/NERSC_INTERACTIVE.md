@@ -2,6 +2,29 @@
 
 On your **laptop**, use the repo virtualenv (`bash scripts/bootstrap_venv.sh`); this page is for **Perlmutter / NERSC** only.
 
+## Environment (required before any training)
+
+Phase 5 uses the official AION codec (`import aion` from PyPI package **`polymathic-aion`**). Use the repo venv and reinstall after `git pull`:
+
+```bash
+cd $HOME/path/to/final-project
+git pull
+bash scripts/bootstrap_venv.sh
+# verify (must print ok, not ModuleNotFoundError):
+.venv/bin/python -c "import aion; print('aion ok')"
+```
+
+If you skip bootstrap, at minimum:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -U pip
+.venv/bin/pip install -e .
+.venv/bin/python -c "import aion; print('aion ok')"
+```
+
+Always run training with **`.venv/bin/python`**, not system `python`.
+
 ```bash
 export NERSC_SCRATCH_ROOT=$SCRATCH/deepsrch
 mkdir -p $NERSC_SCRATCH_ROOT/{manifests,dr1_staged,checkpoints,wandb,logs}
@@ -178,7 +201,7 @@ python scripts/train_codec.py \
 
 ## Train model (4 GPU DDP, official AION spectrum tokenizer)
 
-**Prereq:** `pip install -e ".[dev,aion]"` in project venv. HF auth for gated `polymathic-ai/aion-base`: either copy repo `.env` with `HF_TOKEN=...` to NERSC, or `huggingface-cli login`.
+**Prereq:** venv with `import aion` working (see **Environment** above). HF auth for gated `polymathic-ai/aion-base`: copy repo `.env` with `HF_TOKEN=...` to NERSC, or `huggingface-cli login`.
 
 ```bash
 # Encode smoke (1 process)
