@@ -22,17 +22,22 @@ class SpectrumTokenizer(Protocol):
 
 def tokenize_batch(
     batch: dict,
-    spectrum_tok: SpectrumCodec | SpectrumTokenizer,
+    spectrum_tok: SpectrumCodec | SpectrumTokenizer | None,
     z_codec: RedshiftCodec,
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     batch = {k: v.to(device) if torch.is_tensor(v) else v for k, v in batch.items()}
-    with torch.no_grad():
-        if hasattr(spectrum_tok, "encode_batch") and not isinstance(spectrum_tok, SpectrumCodec):
-            spec_idx, _meta = spectrum_tok.encode_batch(batch)
-        else:
-            x, denorm, _ = prepare_codec_batch(batch)
-            spec_idx, _ = spectrum_tok.encode(x, denorm)
+    if "spec_idx" in batch:
+        spec_idx = batch["spec_idx"].to(device=device, dtype=torch.long)
+    else:
+        if spectrum_tok is None:
+            raise ValueError("spectrum_tok required when batch has no precomputed spec_idx")
+        with torch.no_grad():
+            if hasattr(spectrum_tok, "encode_batch") and not isinstance(spectrum_tok, SpectrumCodec):
+                spec_idx, _meta = spectrum_tok.encode_batch(batch)
+            else:
+                x, denorm, _ = prepare_codec_batch(batch)
+                spec_idx, _ = spectrum_tok.encode(x, denorm)
     z_idx = z_codec.encode_batch(batch["z"]).to(device=device, dtype=torch.long)
     return spec_idx, z_idx
 

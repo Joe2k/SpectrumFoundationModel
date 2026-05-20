@@ -199,6 +199,37 @@ python scripts/train_codec.py \
 
 **Note:** `codec_v2` checkpoints used a simpler median norm; retrain for `codec_v3` (incompatible input pipeline).
 
+## AION token cache (recommended for speed)
+
+Encode each spectrum **once**, then train without running AION in the loop (~2–5× faster steps).
+
+```bash
+# Interactive GPU node (one-time per manifest). Use 4-GPU DDP for ~4× throughput.
+cd $HOME/SpectrumFoundationModel
+python -m torch.distributed.run --nproc_per_node=4 scripts/cache_aion_tokens.py \
+  --manifest $NERSC_SCRATCH_ROOT/manifests/dr1_10k_scratch.jsonl \
+  --token-cache $NERSC_SCRATCH_ROOT/token_cache/dr1_10k \
+  --batch-size 16 --log-every 512
+
+# Single GPU fallback
+.venv/bin/python scripts/cache_aion_tokens.py \
+  --manifest $NERSC_SCRATCH_ROOT/manifests/dr1_10k_scratch.jsonl \
+  --token-cache $NERSC_SCRATCH_ROOT/token_cache/dr1_10k \
+  --batch-size 16 --log-every 256
+
+# Train using cached tokens (can use num_workers 2–4; much lighter than live AION)
+python -m torch.distributed.run --nproc_per_node=4 scripts/train_model.py \
+  --manifest $NERSC_SCRATCH_ROOT/manifests/dr1_10k_scratch.jsonl \
+  --spectrum-tokenizer aion-cached \
+  --token-cache $NERSC_SCRATCH_ROOT/token_cache/dr1_10k \
+  --approach b --run-name p5_approach_b_aion_cached \
+  --steps 10000 --batch-size 8 --num-workers 2 \
+  --lr 1e-4 --val-every 500 \
+  --scratch-out $NERSC_SCRATCH_ROOT/checkpoints --wandb-mode online
+```
+
+Cache layout: `codes.npy`, `z.npy`, `healpix.npy`, `meta.json` under `--token-cache`.
+
 ## Train model (4 GPU DDP, official AION spectrum tokenizer)
 
 **Prereq:** venv with `import aion` working (see **Environment** above). HF auth for gated `polymathic-ai/aion-base`: copy repo `.env` with `HF_TOKEN=...` to NERSC, or `huggingface-cli login`.

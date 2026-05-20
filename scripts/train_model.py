@@ -17,6 +17,7 @@ from torch.utils.data.distributed import DistributedSampler
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from desifm.data.aion_cache import CachedAionDataset, cache_is_complete, collate_cached, load_cache_meta
 from desifm.data.dr1_stream import DR1StreamDataset, collate_spectra, healpix_split, load_manifest
 from desifm.data.synthetic import SyntheticSpectrumDataset
 from desifm.model.transformer import DesiFoundationModel
@@ -112,8 +113,21 @@ def save_checkpoint(path: Path, payload: dict, log: logging.Logger | None = None
         log.info("saved checkpoint step=%s -> %s", payload.get("step"), path)
 
 
+def _tokenizer_compatible(ckpt_tok: str, cli_tok: str) -> bool:
+    if ckpt_tok == cli_tok:
+        return True
+    return {ckpt_tok, cli_tok} <= {"aion", "aion-cached"}
+
+
 def _validate_checkpoint_meta(ckpt: dict, args: argparse.Namespace) -> None:
-    for key in ("approach", "spectrum_tokenizer", "d_model"):
+    if "spectrum_tokenizer" in ckpt and not _tokenizer_compatible(
+        ckpt["spectrum_tokenizer"], args.spectrum_tokenizer
+    ):
+        raise SystemExit(
+            f"checkpoint spectrum_tokenizer={ckpt['spectrum_tokenizer']!r} does not match "
+            f"CLI {args.spectrum_tokenizer!r}; use a new --run-name or --no-resume"
+        )
+    for key in ("approach", "d_model"):
         if key in ckpt and ckpt[key] != getattr(args, key):
             raise SystemExit(
                 f"checkpoint {key}={ckpt[key]!r} does not match CLI {getattr(args, key)!r}; "
@@ -180,9 +194,15 @@ def main():
     p.add_argument("--manifest", type=Path, default=None)
     p.add_argument(
         "--spectrum-tokenizer",
-        choices=["aion", "desifm"],
+        choices=["aion", "aion-cached", "desifm"],
         default="aion",
-        help="Spectrum tokenizer: official AION (default) or desifm SpectrumCodec checkpoint",
+        help="aion=encode each step; aion-cached=prebuilt token cache (fast); desifm=legacy codec",
+    )
+    p.add_argument(
+        "--token-cache",
+        type=Path,
+        default=None,
+        help="Precomputed AION cache dir (required for aion-cached). Build with scripts/cache_aion_tokens.py",
     )
     p.add_argument("--codec-ckpt", type=Path, default=None, help="Required when --spectrum-tokenizer desifm")
     p.add_argument("--aion-hf-repo", default="polymathic-ai/aion-base")
@@ -223,16 +243,24 @@ def main():
     args = p.parse_args()
     load_project_env()
 
-    if args.spectrum_tokenizer == "aion":
-        try:
-            import aion  # noqa: F401
-        except ImportError:
-            raise SystemExit(
-                "Missing package 'aion' (install polymathic-aion). On NERSC run:\n"
-                "  bash scripts/bootstrap_venv.sh\n"
-                "  # or: .venv/bin/pip install -e .\n"
-                "  .venv/bin/python -c \"import aion; print('ok')\""
-            )
+    if args.spectrum_tokenizer in ("aion", "aion-cached"):
+        if args.spectrum_tokenizer == "aion-cached":
+            if args.token_cache is None:
+                raise SystemExit("--token-cache required when --spectrum-tokenizer aion-cached")
+            if not cache_is_complete(args.token_cache):
+                raise SystemExit(
+                    f"incomplete token cache at {args.token_cache}; run:\n"
+                    "  .venv/bin/python scripts/cache_aion_tokens.py --manifest <jsonl> --token-cache <dir>"
+                )
+        else:
+            try:
+                import aion  # noqa: F401
+            except ImportError:
+                raise SystemExit(
+                    "Missing package 'aion' (install polymathic-aion). On NERSC run:\n"
+                    "  bash scripts/bootstrap_venv.sh\n"
+                    "  .venv/bin/python -c \"import aion; print('ok')\""
+                )
 
     if args.spectrum_tokenizer == "desifm" and args.codec_ckpt is None:
         raise SystemExit("--codec-ckpt required when --spectrum-tokenizer desifm")
@@ -247,6 +275,7 @@ def main():
         args.log_every = 5
         args.val_every = 10
 
+    collate_fn = collate_spectra
     if args.synthetic:
         train_ds = SyntheticSpectrumDataset(n_spectra=400, seed=42)
         val_ds = SyntheticSpectrumDataset(n_spectra=80, seed=99)
@@ -257,8 +286,14 @@ def main():
         manifest = require_scratch_manifest(args.manifest)
         records = load_manifest(manifest)
         train_rec, val_rec = healpix_split(records, holdout=0.05, seed=42)
-        train_ds = DR1StreamDataset(train_rec, max_spectra=200 if args.smoke else None)
-        val_ds = DR1StreamDataset(val_rec, max_spectra=50 if args.smoke else None)
+        if args.spectrum_tokenizer == "aion-cached":
+            cache_dir = Path(args.token_cache)
+            train_ds = CachedAionDataset(cache_dir, records, holdout=0.05, seed=42, train=True)
+            val_ds = CachedAionDataset(cache_dir, records, holdout=0.05, seed=42, train=False)
+            collate_fn = collate_cached
+        else:
+            train_ds = DR1StreamDataset(train_rec, max_spectra=200 if args.smoke else None)
+            val_ds = DR1StreamDataset(val_rec, max_spectra=50 if args.smoke else None)
         z_samples = collect_z(train_rec)
 
     train_sampler = DistributedSampler(train_ds, shuffle=True) if world_size > 1 else None
@@ -266,8 +301,8 @@ def main():
     use_cuda = device.type == "cuda"
     loader_kw = dict(
         num_workers=args.num_workers,
-        collate_fn=collate_spectra,
-        pin_memory=use_cuda,
+        collate_fn=collate_fn,
+        pin_memory=use_cuda and args.spectrum_tokenizer != "aion-cached",
         persistent_workers=args.num_workers > 0,
     )
     train_loader = DataLoader(
@@ -307,11 +342,17 @@ def main():
             world_size,
         )
         log.info("manifest=%s", args.manifest if not args.synthetic else "(synthetic)")
+        if args.spectrum_tokenizer == "aion-cached":
+            meta = load_cache_meta(Path(args.token_cache))
+            log.info("token_cache=%s n_cached=%s", args.token_cache, meta.get("n_spectra"))
         log.info("log_every=%d val_every=%d metrics=%s train.log=%s", args.log_every, val_every, metrics_path, run_dir / "train.log")
         sys.stdout.flush()
 
+    spectrum_tok: AionSpectrumTokenizer | SpectrumCodec | None
     if args.spectrum_tokenizer == "aion":
         spectrum_tok = AionSpectrumTokenizer(device, hf_repo=args.aion_hf_repo)
+    elif args.spectrum_tokenizer == "aion-cached":
+        spectrum_tok = None
     else:
         spectrum_tok = SpectrumCodec().to(device)
         spectrum_tok.load_state_dict(
