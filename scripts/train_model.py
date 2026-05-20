@@ -80,6 +80,12 @@ def main():
     p.add_argument("--scratch-out", type=Path, default=None)
     p.add_argument("--steps", type=int, default=10000)
     p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="DataLoader workers per process (FITS I/O). Try 4–8 on NERSC per GPU rank.",
+    )
     p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--z-weight", type=float, default=20.0)
     p.add_argument("--aux-z-weight", type=float, default=0.5)
@@ -111,6 +117,7 @@ def main():
     if args.smoke:
         args.steps, args.batch_size, args.d_model = 30, 2, 128
         args.synthetic = True
+        args.num_workers = 0
 
     if args.synthetic:
         train_ds = SyntheticSpectrumDataset(n_spectra=400, seed=42)
@@ -128,20 +135,27 @@ def main():
 
     train_sampler = DistributedSampler(train_ds, shuffle=True) if world_size > 1 else None
     val_sampler = DistributedSampler(val_ds, shuffle=False) if world_size > 1 else None
+    use_cuda = device.type == "cuda"
+    loader_kw = dict(
+        num_workers=args.num_workers,
+        collate_fn=collate_spectra,
+        pin_memory=use_cuda,
+        persistent_workers=args.num_workers > 0,
+    )
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
         shuffle=train_sampler is None,
         sampler=train_sampler,
-        collate_fn=collate_spectra,
         drop_last=True,
+        **loader_kw,
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=args.batch_size,
         shuffle=False,
         sampler=val_sampler,
-        collate_fn=collate_spectra,
+        **loader_kw,
     )
 
     out_root = args.scratch_out or scratch_root() / "checkpoints"
