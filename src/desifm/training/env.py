@@ -28,4 +28,12 @@ def load_project_env() -> bool:
     hf = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     if hf and not os.environ.get("HUGGING_FACE_HUB_TOKEN"):
         os.environ["HUGGING_FACE_HUB_TOKEN"] = hf
+    # Persistent HF cache on SCRATCH (login-node prefetch; compute nodes often lack WAN)
+    if not os.environ.get("HF_HOME"):
+        scratch = os.environ.get("NERSC_SCRATCH_ROOT") or os.environ.get("SCRATCH")
+        if scratch:
+            cache = Path(scratch) / "hf_cache"
+            cache.mkdir(parents=True, exist_ok=True)
+            os.environ["HF_HOME"] = str(cache)
+            os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(cache))
     return env_path.is_file()

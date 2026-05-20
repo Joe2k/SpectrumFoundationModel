@@ -92,8 +92,21 @@ def main():
         tuple(batch["flux"].shape),
         tuple(batch["wavelength"].shape),
     )
-    log.info("initializing AION CodecManager (first run downloads HF weights; may take 1–3 min)...")
+    import os
+
+    hf_home = os.environ.get("HF_HOME", "(default ~/.cache/huggingface)")
+    log.info("HF_HOME=%s", hf_home)
+    log.info(
+        "next: AION loads DESI codec from Hugging Face on first encode "
+        "(1–5 min on login node; compute nodes may hang without cache — see scripts/prefetch_aion_codec.py)"
+    )
     sys.stdout.flush()
+
+    desifm_log = logging.getLogger("desifm")
+    desifm_log.setLevel(logging.INFO)
+    for h in log.handlers:
+        if h not in desifm_log.handlers:
+            desifm_log.addHandler(h)
 
     device = torch.device(args.device)
     tok = AionSpectrumTokenizer(device)

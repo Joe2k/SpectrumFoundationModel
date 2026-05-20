@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+import sys
 from typing import Any
 
 import torch
+
+log = logging.getLogger(__name__)
 
 from desifm.constants import GRID_SIZE, N_LATENT_TOKENS, N_SPECTRUM_CODES
 from desifm.tokenization.aion_grid import resample_spectrum_batch
@@ -32,7 +36,11 @@ class AionSpectrumTokenizer:
                     "polymathic-aion is required for AION tokenization. "
                     'Install with: pip install -e ".[aion]"'
                 ) from e
+            log.info("creating CodecManager(device=%s)...", self.device)
+            sys.stdout.flush()
             self._codec_manager = CodecManager(device=str(self.device))
+            log.info("CodecManager ready (HF weights load on first encode)")
+            sys.stdout.flush()
         return self._codec_manager
 
     @torch.no_grad()
@@ -50,7 +58,14 @@ class AionSpectrumTokenizer:
         )
 
         spec = DESISpectrum(flux=flux, ivar=ivar, mask=mask, wavelength=wavelength)
+        log.info(
+            "AION encode: loading DESI spectrum codec from HF (polymathic-ai/aion-base) "
+            "if not cached — on NERSC run prefetch_aion_codec.py on a login node first"
+        )
+        sys.stdout.flush()
         tokens = self._manager().encode(spec)
+        log.info("AION encode finished")
+        sys.stdout.flush()
         if AION_TOKEN_KEY not in tokens:
             raise KeyError(f"expected {AION_TOKEN_KEY!r} in encode output, got {list(tokens.keys())}")
 

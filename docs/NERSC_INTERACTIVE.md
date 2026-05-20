@@ -205,11 +205,35 @@ python scripts/train_codec.py \
 
 ```bash
 # Encode smoke (1 process)
+**Prefetch AION codec on the login node first** (compute nodes often cannot reach Hugging Face and will hang at “initializing…”):
+
+```bash
+# login node (e.g. perlmutter login)
+cd $HOME/SpectrumFoundationModel
+git pull
+bash scripts/bootstrap_venv.sh
+# copy .env with HF_TOKEN=... to repo root
+
+.venv/bin/python scripts/prefetch_aion_codec.py
+# cache -> $NERSC_SCRATCH_ROOT/hf_cache (set automatically from SCRATCH)
+```
+
+Then on a GPU node:
+
+```bash
 .venv/bin/python scripts/smoke_aion_tokenizer.py --synthetic \
   --scratch-out $NERSC_SCRATCH_ROOT/checkpoints
-# Logs: $NERSC_SCRATCH_ROOT/checkpoints/smoke_aion_tokenizer/smoke.log
-#       $NERSC_SCRATCH_ROOT/checkpoints/smoke_aion_tokenizer/metrics.jsonl
-# First run may sit silent 1–3 min while HF downloads aion-base codec weights.
+
+.venv/bin/python scripts/smoke_aion_tokenizer.py \
+  --manifest $NERSC_SCRATCH_ROOT/manifests/dr1_1k_scratch.jsonl \
+  --batch-size 2 --device cuda \
+  --scratch-out $NERSC_SCRATCH_ROOT/checkpoints \
+  --run-name smoke_aion_dr1_1k
+```
+
+Logs: `$NERSC_SCRATCH_ROOT/checkpoints/smoke_aion_dr1_1k/smoke.log` and `metrics.jsonl`.
+
+If stuck >10 min at HF load: `Ctrl+C`, run `prefetch_aion_codec.py` on login node, retry.
 
 # Transformer smoke (~30 steps)
 python scripts/train_model.py --synthetic --smoke --spectrum-tokenizer aion \
