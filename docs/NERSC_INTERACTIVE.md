@@ -112,26 +112,48 @@ torchrun --standalone --nnodes=1 --nproc_per_node=4 scripts/train_codec.py \
 
 `SpectrumCodecV5`: U-Net skips, cross-attention, `latent_dim=10`.
 
-**Stop `codec_v5b_r2` / `codec_v5b_r3`** — batch histogram entropy (`bincount` on discrete indices) has **no gradient** to the encoder; scaling `λ_ent` only multiplies a saturated ~1.0 penalty.
+**Stop `codec_v5b_r2`–`r5`** — marginal bit-balance + 4k `λ_phys` ramp still collapsed to ~3–5 codes.
 
-**Recommended run (`codec_v5b_r4`, FM loss profile):** physical MSE from step 0, differentiable `latent_bit_balance_loss` on pre-quant `z`, in-quant histogram entropy at weight **0.1** (monitor via `train/entropy`).
+**Recommended run (`codec_v5b_r6`):** v5 **fm** defaults after `git pull`:
+
+| Default | Value |
+|---------|--------|
+| `λ_phys` | **0.5 from step 0** (no 4k ramp) |
+| `diversity_loss_weight` | **2.0** |
+| LFQ temperature | **1.0 → 0.1** over **2000** steps (`sign(z/τ)` STE) |
 
 ```bash
+cd $HOME/SpectrumFoundationModel
+git pull
+module load pytorch/2.8.0
+pip install -e .
+
 torchrun --standalone --nnodes=1 --nproc_per_node=4 scripts/train_codec.py \
   --manifest $NERSC_SCRATCH_ROOT/manifests/dr1_1k_scratch.jsonl \
-  --run-name codec_v5b_r4 \
+  --run-name codec_v5b_r6 \
   --codec-version v5 \
   --loss-profile fm \
-  --diversity-loss-weight 1.0 \
   --no-delay-lambda-phys-until-code-usage \
   --batch-size 32 \
   --num-workers 8 \
   --wandb-mode online
 ```
 
-Legacy **desifm** profile (delayed `λ_phys`, external batch entropy): `--loss-profile desifm` (v5a still uses v4 backbone + desifm defaults).
+Explicit overrides (usually not needed; fm defaults match r6):
 
-Watch W&B (r4): `val/n_unique_codes` (target ≥77), `train/diversity_loss` (should decrease), `train/entropy` (histogram monitor, target &lt;0.9 sustained), `val/std_ratio_per_spec_median` (&gt;0.5), `train/phys`, `train/q_loss`.
+```bash
+  --lambda-phys-ramp-steps 0 \
+  --diversity-loss-weight 2.0 \
+  --quant-temperature-start 1.0 \
+  --quant-temperature-min 0.1 \
+  --quant-temperature-anneal-steps 2000
+```
+
+Legacy **desifm** profile: `--loss-profile desifm` (delayed `λ_phys`, 4k ramp, external batch entropy).
+
+**Gate @ val step 500:** `val/n_unique_codes` **> 20** (on track to 77); if still ≤ 5, stop and debug.
+
+Watch W&B: `val/n_unique_codes`, `train/diversity_loss`, `train/quant_temperature`, `train/entropy` (&lt;0.9), `train/lambda_phys_eff` (should be **0.5** immediately), `train/q_loss` (should stay **> 0.01** early).
 
 ### codec_v3 (legacy)
 

@@ -103,8 +103,9 @@ def audit_code_usage(
         params = sig.co_varnames
         if "loss_profile" in params:
             forward_kw.setdefault("loss_profile", "fm")
-            forward_kw.setdefault("lambda_diversity", 1.0)
+            forward_kw.setdefault("lambda_diversity", 2.0)
             forward_kw.setdefault("lambda_arcsinh", 0.1)
+            forward_kw.setdefault("quant_temperature", 0.1)
         if "use_batch_entropy" in params and use_batch_entropy:
             forward_kw["use_batch_entropy"] = use_batch_entropy
     out = model(x, denorm, mask=mask, **forward_kw)

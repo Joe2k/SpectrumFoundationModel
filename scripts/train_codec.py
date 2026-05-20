@@ -34,6 +34,7 @@ from desifm.training.codec_loss import (
     flux_rms,
     flux_std_ratio,
     flux_std_ratio_per_sample,
+    quant_temperature_at_step,
 )
 from desifm.training.distributed import (
     all_ranks_agree_skip,
@@ -82,12 +83,14 @@ def model_forward_kw(
     loss_profile: str = "fm",
     diversity_loss_weight: float = 0.0,
     lambda_arcsinh: float = 0.1,
+    quant_temperature: float = 1.0,
 ) -> dict:
     if codec_version == "v5":
         kw: dict = {
             "loss_profile": loss_profile,
             "lambda_diversity": diversity_loss_weight,
             "lambda_arcsinh": lambda_arcsinh,
+            "quant_temperature": quant_temperature,
         }
         if loss_profile == "desifm":
             kw["use_batch_entropy"] = True
@@ -242,7 +245,9 @@ def infer_codec_version(run_name: str, explicit: str | None) -> str:
     return "v3"
 
 
-def _apply_tier1_training_defaults(args: argparse.Namespace) -> None:
+def _apply_tier1_training_defaults(
+    args: argparse.Namespace, *, apply_phys_ramp: bool = True
+) -> None:
     if args.steps == 5000:
         args.steps = 20_000
     if args.batch_size == 16:
@@ -255,7 +260,7 @@ def _apply_tier1_training_defaults(args: argparse.Namespace) -> None:
         args.val_every = 500
     if args.lr_schedule == "constant":
         args.lr_schedule = "cosine"
-    if args.lambda_phys_ramp_steps == 0:
+    if apply_phys_ramp and args.lambda_phys_ramp_steps == 0:
         args.lambda_phys_ramp_steps = 4000
     if getattr(args, "warmup_steps", 0) == 0:
         args.warmup_steps = 1000
@@ -275,22 +280,30 @@ def apply_version_defaults(args: argparse.Namespace) -> None:
         if args.delay_lambda_phys_until_code_usage is None:
             args.delay_lambda_phys_until_code_usage = True
     elif args.codec_version == "v5":
-        _apply_tier1_training_defaults(args)
+        if args.loss_profile is None:
+            args.loss_profile = "fm"
+        _apply_tier1_training_defaults(
+            args, apply_phys_ramp=(args.loss_profile != "fm")
+        )
         if args.checkpoint_metric == "median":
             args.checkpoint_metric = "val_std_ratio_per_spec_median"
         if args.min_code_usage_fraction == 0.0:
             args.min_code_usage_fraction = 0.3
         if args.weight_decay == 0.0:
             args.weight_decay = 0.05
-        if args.loss_profile is None:
-            args.loss_profile = "fm"
         if args.loss_profile == "fm":
             if args.delay_lambda_phys_until_code_usage is None:
                 args.delay_lambda_phys_until_code_usage = False
             if args.diversity_loss_weight is None:
-                args.diversity_loss_weight = 1.0
+                args.diversity_loss_weight = 2.0
             if args.lambda_arcsinh is None:
                 args.lambda_arcsinh = 0.1
+            if args.quant_temperature_start is None:
+                args.quant_temperature_start = 1.0
+            if args.quant_temperature_min is None:
+                args.quant_temperature_min = 0.1
+            if args.quant_temperature_anneal_steps is None:
+                args.quant_temperature_anneal_steps = 2000
         else:
             if args.delay_lambda_phys_until_code_usage is None:
                 args.delay_lambda_phys_until_code_usage = True
@@ -373,6 +386,24 @@ def main():
         type=float,
         default=None,
         help="Aux arcsinh recon weight (v5 fm default 0.1, desifm 0.25)",
+    )
+    p.add_argument(
+        "--quant-temperature-start",
+        type=float,
+        default=None,
+        help="Initial LFQ temperature tau for sign(z/tau) (v5 fm default 1.0)",
+    )
+    p.add_argument(
+        "--quant-temperature-min",
+        type=float,
+        default=None,
+        help="Final tau after anneal (v5 fm default 0.1)",
+    )
+    p.add_argument(
+        "--quant-temperature-anneal-steps",
+        type=int,
+        default=None,
+        help="Anneal tau start→min over N steps; 0 disables (v5 fm default 2000)",
     )
     p.add_argument("--commitment-weight", type=float, default=None, help="LFQ beta (v4 default 0.05)")
     p.add_argument("--wandb-mode", default="online", choices=["online", "offline", "disabled"])
@@ -492,6 +523,9 @@ def main():
             getattr(args, "loss_profile", "n/a"),
             getattr(args, "diversity_loss_weight", 0.0) or 0.0,
             getattr(args, "lambda_arcsinh", 0.0) or 0.0,
+            getattr(args, "quant_temperature_start", 1.0) or 1.0,
+            getattr(args, "quant_temperature_min", 0.1) or 0.1,
+            getattr(args, "quant_temperature_anneal_steps", 0) or 0,
             commitment,
         )
         eff_batch = args.batch_size * world_size
@@ -520,11 +554,27 @@ def main():
         lr=args.lr,
         weight_decay=args.weight_decay,
     )
-    fwd_extra = model_forward_kw(
+    loss_profile = getattr(args, "loss_profile", "fm") or "fm"
+    diversity_w = float(getattr(args, "diversity_loss_weight", 0.0) or 0.0)
+    lambda_arcsinh = float(getattr(args, "lambda_arcsinh", 0.1) or 0.1)
+    quant_t_start = float(getattr(args, "quant_temperature_start", 1.0) or 1.0)
+    quant_t_min = float(getattr(args, "quant_temperature_min", 0.1) or 0.1)
+    quant_t_anneal = int(getattr(args, "quant_temperature_anneal_steps", 0) or 0)
+
+    def quant_temperature_for_step(train_step: int) -> float:
+        return quant_temperature_at_step(
+            train_step,
+            start=quant_t_start,
+            min_temp=quant_t_min,
+            anneal_steps=quant_t_anneal,
+        )
+
+    fwd_extra_base = model_forward_kw(
         args.codec_version,
-        loss_profile=getattr(args, "loss_profile", "fm") or "fm",
-        diversity_loss_weight=float(getattr(args, "diversity_loss_weight", 0.0) or 0.0),
-        lambda_arcsinh=float(getattr(args, "lambda_arcsinh", 0.1) or 0.1),
+        loss_profile=loss_profile,
+        diversity_loss_weight=diversity_w,
+        lambda_arcsinh=lambda_arcsinh,
+        quant_temperature=1.0,
     )
     wb = init_run(args.wandb_mode, args.run_name, vars(args), run_dir / "wandb", group="phase2-codec") if main_proc else None
     if main_proc and wb is not None:
@@ -619,6 +669,10 @@ def main():
             if args.lambda_phys > 0
             else 0.0
         )
+        fwd_extra = {
+            **fwd_extra_base,
+            "quant_temperature": quant_temperature_for_step(step),
+        }
         out = unwrap(model)(
             x,
             denorm,
@@ -671,6 +725,7 @@ def main():
                     "lambda_phys_eff": lambda_phys_eff,
                     "lambda_ramp": ramp,
                     "lambda_phys_unlocked": phys_unlocked,
+                    "quant_temperature": fwd_extra.get("quant_temperature", 1.0),
                 }
                 if tracker:
                     rec["loss_avg"] = avg_f
@@ -696,6 +751,7 @@ def main():
                     "train/q_loss": out["q_loss"].item(),
                     "train/entropy": rec["entropy_loss"],
                     "train/diversity_loss": rec["diversity_loss"],
+                    "train/quant_temperature": rec.get("quant_temperature", 1.0),
                     "train/skipped": skipped,
                     "train/lr": opt.param_groups[0]["lr"],
                     "train/lambda_phys_eff": lambda_phys_eff,
@@ -726,6 +782,10 @@ def main():
                     phys_unlocked=phys_unlocked,
                     phys_ramp_origin=phys_ramp_origin,
                 )
+                val_fwd = {
+                    **fwd_extra_base,
+                    "quant_temperature": quant_temperature_for_step(step),
+                }
                 val_stats = run_validation(
                     unwrap(model),
                     val_loader,
@@ -734,7 +794,7 @@ def main():
                     codec_version=args.codec_version,
                     lambda_phys=val_lambda_phys,
                     lambda_entropy=args.lambda_entropy,
-                    fwd_extra=fwd_extra,
+                    fwd_extra=val_fwd,
                     max_batches=args.val_max_batches,
                 )
                 if (

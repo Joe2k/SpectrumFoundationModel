@@ -116,12 +116,17 @@ def test_apply_version_defaults_v5_fm_profile():
         loss_profile=None,
         diversity_loss_weight=None,
         lambda_arcsinh=None,
+        quant_temperature_start=None,
+        quant_temperature_min=None,
+        quant_temperature_anneal_steps=None,
     )
     tc.apply_version_defaults(args)
     assert args.loss_profile == "fm"
     assert args.delay_lambda_phys_until_code_usage is False
-    assert args.diversity_loss_weight == 1.0
+    assert args.lambda_phys_ramp_steps == 0
+    assert args.diversity_loss_weight == 2.0
     assert args.lambda_arcsinh == 0.1
+    assert args.quant_temperature_anneal_steps == 2000
 
 
 def test_apply_version_defaults_v5_desifm_profile():

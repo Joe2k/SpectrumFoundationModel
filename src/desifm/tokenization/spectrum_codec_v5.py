@@ -107,10 +107,13 @@ class LFQuantizerV5(nn.Module):
         z: torch.Tensor,
         *,
         entropy_weight: float | None = None,
+        quant_temperature: float = 1.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         z = self.project_in(z)
-        z_q = torch.sign(z)
-        z_q = z + (z_q - z).detach()
+        tau = max(float(quant_temperature), 1e-3)
+        z_scaled = z / tau
+        z_hard = torch.sign(z_scaled)
+        z_q = z_scaled + (z_hard - z_scaled).detach()
         commit = F.mse_loss(z_q.detach(), z)
         codebook = F.mse_loss(z_q, z.detach())
         indices = self._indices(z_q)
@@ -269,6 +272,7 @@ class SpectrumCodecV5(nn.Module):
         entropy_weight: float | None = None,
         lambda_entropy: float = 0.0,
         use_batch_entropy: bool = False,
+        quant_temperature: float = 1.0,
     ) -> dict:
         x = self._resize(x)
         z_pre, skips = self._encode(x)
@@ -278,7 +282,9 @@ class SpectrumCodecV5(nn.Module):
             div_loss = latent_bit_balance_loss(z_pre) if lambda_diversity > 0 else torch.zeros(
                 (), device=x.device, dtype=x.dtype
             )
-            z_q, q_loss, ent_loss, indices = self.quant(z_pre, entropy_weight=ent_w)
+            z_q, q_loss, ent_loss, indices = self.quant(
+                z_pre, entropy_weight=ent_w, quant_temperature=quant_temperature
+            )
             recon = self._decode(indices, skips)
             loss_mask = align_mask_to_length(mask, recon.shape[-1])
 
@@ -312,7 +318,9 @@ class SpectrumCodecV5(nn.Module):
             }
 
         # desifm legacy profile (v5a-style external batch entropy)
-        z_q, q_loss, ent_loss_q, indices = self.quant(z_pre, entropy_weight=0.0)
+        z_q, q_loss, ent_loss_q, indices = self.quant(
+            z_pre, entropy_weight=0.0, quant_temperature=quant_temperature
+        )
         recon = self._decode(self._pad_indices(indices), skips)
         loss_mask = align_mask_to_length(mask, recon.shape[-1])
         recon_phys = denormalize_spectrum_output(recon, denorm)

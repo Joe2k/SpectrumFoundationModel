@@ -232,7 +232,7 @@ Two-stage plan (see plan doc in Cursor, not committed):
 | **v5a** | v4 backbone + FM **batch entropy**, `λ_ent≈0.75`, checkpoint `val/std_ratio_per_spec_median`, reject if `code_usage_fraction < 0.3` | ≥77 unique codes (30% of 256), per-spec median > 0.5 |
 | **v5b** | `SpectrumCodecV5` — skips, cross-attn, `latent_dim=10`, physical MSE primary | Same + visual line structure in notebook 03 |
 
-**Train (NERSC):** `codec_v5a_antollapse` (`--codec-version v5a`), then `codec_v5b_r4` (`--codec-version v5 --loss-profile fm`). See `docs/NERSC_INTERACTIVE.md`.
+**Train (NERSC):** `codec_v5a_antollapse` (`--codec-version v5a`), then **`codec_v5b_r6`** (`--codec-version v5 --loss-profile fm` — full λ_phys, diversity×2, quant τ anneal). See `docs/NERSC_INTERACTIVE.md`.
 
 **v5b collapse pitfall (r2/r3):** `batch_codebook_entropy_loss(indices)` uses `torch.bincount` on **discrete** LFQ indices — **no encoder gradient**. Raising `--lambda-entropy` to 1.5–3.0 only scales a near-constant ~1.0 penalty while `λ_phys` was gated at 0 → 2-code basin. **Fix (r4):** `latent_bit_balance_loss(z_pre)` (differentiable), FM primary phys MSE from step 0, histogram entropy inside quant at `entropy_weight=0.1`.
 

@@ -9,6 +9,7 @@ from desifm.training.codec_loss import (
     flux_std_ratio_per_sample,
     latent_bit_balance_loss,
     latent_index_entropy_penalty,
+    quant_temperature_at_step,
     physical_flux_loss,
     top_hat_smooth_flux,
 )
@@ -37,6 +38,13 @@ def test_code_usage_stats_empty():
     stats = code_usage_stats(torch.zeros(0, dtype=torch.long), n_codes=256)
     assert stats["n_unique"] == 0
     assert stats["usage_fraction"] == 0.0
+
+
+def test_quant_temperature_anneal():
+    assert quant_temperature_at_step(0, start=1.0, min_temp=0.1, anneal_steps=2000) == 1.0
+    assert abs(quant_temperature_at_step(1000, start=1.0, min_temp=0.1, anneal_steps=2000) - 0.55) < 0.01
+    assert abs(quant_temperature_at_step(2000, start=1.0, min_temp=0.1, anneal_steps=2000) - 0.1) < 1e-6
+    assert quant_temperature_at_step(5000, start=1.0, min_temp=0.1, anneal_steps=0) == 1.0
 
 
 def test_latent_bit_balance_collapsed_high():

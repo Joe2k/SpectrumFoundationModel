@@ -46,6 +46,20 @@ def physical_flux_loss(
     return masked_recon_loss(recon_phys, target_phys, mask, huber_delta=huber_delta)
 
 
+def quant_temperature_at_step(
+    step: int,
+    *,
+    start: float = 1.0,
+    min_temp: float = 0.1,
+    anneal_steps: int = 2000,
+) -> float:
+    """Linear anneal for LFQ ``sign(z / tau)`` (tau=start → min_temp over anneal_steps)."""
+    if anneal_steps <= 0:
+        return start
+    frac = min(max(step / anneal_steps, 0.0), 1.0)
+    return start + frac * (min_temp - start)
+
+
 def latent_bit_balance_loss(z: torch.Tensor) -> torch.Tensor:
     """Differentiable LFQ diversity: penalize collapsed per-bit marginals (0 = balanced, 1 = collapsed)."""
     if z.ndim != 3:
