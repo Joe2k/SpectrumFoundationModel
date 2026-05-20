@@ -110,21 +110,28 @@ torchrun --standalone --nnodes=1 --nproc_per_node=4 scripts/train_codec.py \
 
 ### codec_v5b (FM V2–inspired tokenizer)
 
-`SpectrumCodecV5`: U-Net skips, cross-attention, `latent_dim=10`, physical flux MSE primary.
+`SpectrumCodecV5`: U-Net skips, cross-attention, `latent_dim=10`.
 
-**Default for v5a/v5:** `λ_phys` stays **0** until `val/code_usage_fraction ≥ 0.3`, then ramps over 4k steps (avoids phys-driven collapse). Disable with `--no-delay-lambda-phys-until-code-usage`.
+**Stop `codec_v5b_r2` / `codec_v5b_r3`** — batch histogram entropy (`bincount` on discrete indices) has **no gradient** to the encoder; scaling `λ_ent` only multiplies a saturated ~1.0 penalty.
+
+**Recommended run (`codec_v5b_r4`, FM loss profile):** physical MSE from step 0, differentiable `latent_bit_balance_loss` on pre-quant `z`, in-quant histogram entropy at weight **0.1** (monitor via `train/entropy`).
 
 ```bash
 torchrun --standalone --nnodes=1 --nproc_per_node=4 scripts/train_codec.py \
   --manifest $NERSC_SCRATCH_ROOT/manifests/dr1_1k_scratch.jsonl \
-  --run-name codec_v5b \
+  --run-name codec_v5b_r4 \
   --codec-version v5 \
+  --loss-profile fm \
+  --diversity-loss-weight 1.0 \
+  --no-delay-lambda-phys-until-code-usage \
   --batch-size 32 \
   --num-workers 8 \
   --wandb-mode online
 ```
 
-Watch W&B: `val/n_unique_codes`, `val/code_usage_fraction`, `train/lambda_phys_unlocked`, `val/std_ratio_per_spec_median`. Log line `λ_phys unlocked at step …` when the gate passes.
+Legacy **desifm** profile (delayed `λ_phys`, external batch entropy): `--loss-profile desifm` (v5a still uses v4 backbone + desifm defaults).
+
+Watch W&B (r4): `val/n_unique_codes` (target ≥77), `train/diversity_loss` (should decrease), `train/entropy` (histogram monitor, target &lt;0.9 sustained), `val/std_ratio_per_spec_median` (&gt;0.5), `train/phys`, `train/q_loss`.
 
 ### codec_v3 (legacy)
 

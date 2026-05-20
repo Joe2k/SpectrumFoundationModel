@@ -46,6 +46,17 @@ def physical_flux_loss(
     return masked_recon_loss(recon_phys, target_phys, mask, huber_delta=huber_delta)
 
 
+def latent_bit_balance_loss(z: torch.Tensor) -> torch.Tensor:
+    """Differentiable LFQ diversity: penalize collapsed per-bit marginals (0 = balanced, 1 = collapsed)."""
+    if z.ndim != 3:
+        raise ValueError("z must have shape (B, dim, L)")
+    probs = torch.sigmoid(z)
+    p = probs.mean(dim=(0, 2)).clamp(1e-4, 1.0 - 1e-4)
+    bit_ent = -(p * torch.log(p) + (1.0 - p) * torch.log(1.0 - p)).sum()
+    max_ent = math.log(2) * z.shape[1]
+    return (1.0 - bit_ent / max_ent).clamp(min=0.0, max=1.0)
+
+
 def batch_codebook_entropy_loss(indices: torch.Tensor, n_bins: int = 256) -> torch.Tensor:
     """FM-style penalty: low entropy of the code histogram over the whole batch (0 = uniform)."""
     flat = indices.reshape(-1)

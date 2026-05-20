@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from typing import Tuple
 
 import torch
@@ -15,7 +14,7 @@ from desifm.training.codec_input import denormalize_spectrum_output, masked_reco
 from desifm.training.codec_loss import (
     align_mask_to_length,
     batch_codebook_entropy_loss,
-    physical_flux_loss,
+    latent_bit_balance_loss,
 )
 
 
@@ -82,13 +81,20 @@ class CrossAttentionV5(nn.Module):
 
 
 class LFQuantizerV5(nn.Module):
-    """LFQ with project_in and FM-style batch entropy in the outer forward."""
+    """LFQ with project_in; FM-style commitment + weighted histogram entropy on indices."""
 
-    def __init__(self, dim: int = 10, n_codes: int | None = None, commitment_weight: float = 0.05):
+    def __init__(
+        self,
+        dim: int = 10,
+        n_codes: int | None = None,
+        commitment_weight: float = 0.05,
+        entropy_weight: float = 0.1,
+    ):
         super().__init__()
         self.dim = dim
         self.n_codes = 2**dim if n_codes is None else n_codes
         self.commitment_weight = commitment_weight
+        self.entropy_weight = entropy_weight
         self.project_in = nn.Conv1d(dim, dim, kernel_size=1)
 
     def _indices(self, z_q: torch.Tensor) -> torch.Tensor:
@@ -96,15 +102,23 @@ class LFQuantizerV5(nn.Module):
         powers = (2 ** torch.arange(self.dim, device=z_q.device, dtype=torch.long)).view(1, -1, 1)
         return (bits * powers).sum(dim=1)
 
-    def forward(self, z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        z: torch.Tensor,
+        *,
+        entropy_weight: float | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         z = self.project_in(z)
         z_q = torch.sign(z)
         z_q = z + (z_q - z).detach()
-        # Match FM V2 / desifm v4: commitment + β·codebook (not unweighted codebook).
         commit = F.mse_loss(z_q.detach(), z)
         codebook = F.mse_loss(z_q, z.detach())
         indices = self._indices(z_q)
-        return z_q, commit + self.commitment_weight * codebook, indices
+        hist_ent = batch_codebook_entropy_loss(indices, n_bins=self.n_codes)
+        q_loss = commit + self.commitment_weight * codebook
+        ew = self.entropy_weight if entropy_weight is None else entropy_weight
+        ent_loss = ew * hist_ent
+        return z_q, q_loss, ent_loss, indices
 
     def decode(self, indices: torch.Tensor) -> torch.Tensor:
         b, length = indices.shape
@@ -115,7 +129,7 @@ class LFQuantizerV5(nn.Module):
 
 
 class SpectrumCodecV5(nn.Module):
-    """v5 tokenizer: skips + cross-attention; physical flux loss primary when training."""
+    """v5 tokenizer: skips + cross-attention; FM loss profile by default."""
 
     def __init__(
         self,
@@ -125,6 +139,7 @@ class SpectrumCodecV5(nn.Module):
         encoder_dims: Tuple[int, ...] = (96, 192, 384, 512),
         *,
         commitment_weight: float = 0.05,
+        entropy_weight: float = 0.1,
         use_skip_connections: bool = True,
         use_cross_attention: bool = True,
     ):
@@ -134,6 +149,7 @@ class SpectrumCodecV5(nn.Module):
         self.latent_dim = latent_dim
         self.use_skip_connections = use_skip_connections
         self.use_cross_attention = use_cross_attention
+        self.default_entropy_weight = entropy_weight
 
         self.encoder_stem = nn.Sequential(
             nn.Conv1d(in_channels, encoder_dims[0], kernel_size=4, stride=4),
@@ -150,7 +166,11 @@ class SpectrumCodecV5(nn.Module):
 
         self.pre_quant_norm = ChannelLayerNorm(encoder_dims[-1])
         self.quant_conv = nn.Conv1d(encoder_dims[-1], latent_dim, kernel_size=1)
-        self.quant = LFQuantizerV5(latent_dim, commitment_weight=commitment_weight)
+        self.quant = LFQuantizerV5(
+            latent_dim,
+            commitment_weight=commitment_weight,
+            entropy_weight=entropy_weight,
+        )
         self.post_quant_conv = nn.Conv1d(latent_dim, encoder_dims[-1], kernel_size=1)
 
         decoder_dims = (encoder_dims[-1], encoder_dims[-2], encoder_dims[-3], encoder_dims[0])
@@ -207,8 +227,8 @@ class SpectrumCodecV5(nn.Module):
                 h = block(h)
             skips.append(h)
         h = self.pre_quant_norm(h)
-        h = self.quant_conv(h)
-        return h, skips
+        z_pre = self.quant_conv(h)
+        return z_pre, skips
 
     def _decode(self, indices: torch.Tensor, skips: list[torch.Tensor]) -> torch.Tensor:
         h = self.post_quant_conv(self.quant.decode(indices))
@@ -242,49 +262,91 @@ class SpectrumCodecV5(nn.Module):
         denorm: torch.Tensor,
         mask: torch.Tensor | None = None,
         *,
-        lambda_phys: float = 0.5,
-        lambda_entropy: float = 0.5,
-        use_batch_entropy: bool = True,
-        lambda_arcsinh: float = 0.25,
+        loss_profile: str = "fm",
+        lambda_phys: float = 1.0,
+        lambda_diversity: float = 1.0,
+        lambda_arcsinh: float = 0.1,
+        entropy_weight: float | None = None,
+        lambda_entropy: float = 0.0,
+        use_batch_entropy: bool = False,
     ) -> dict:
         x = self._resize(x)
-        h, skips = self._encode(x)
-        z_q, q_loss, indices = self.quant(h)
+        z_pre, skips = self._encode(x)
+        ent_w = self.default_entropy_weight if entropy_weight is None else entropy_weight
+
+        if loss_profile == "fm":
+            div_loss = latent_bit_balance_loss(z_pre) if lambda_diversity > 0 else torch.zeros(
+                (), device=x.device, dtype=x.dtype
+            )
+            z_q, q_loss, ent_loss, indices = self.quant(z_pre, entropy_weight=ent_w)
+            recon = self._decode(indices, skips)
+            loss_mask = align_mask_to_length(mask, recon.shape[-1])
+
+            recon_phys = denormalize_spectrum_output(recon, denorm)
+            target_phys = denormalize_spectrum_output(x, denorm)
+            phys_loss = masked_recon_loss(recon_phys[:, 0], target_phys[:, 0], loss_mask)
+            arcsinh_loss = masked_recon_loss(recon[:, 0], x[:, 0], loss_mask)
+            hist_ent_monitor = batch_codebook_entropy_loss(indices, n_bins=self.quant.n_codes)
+
+            recon_loss = phys_loss
+            total = (
+                lambda_phys * phys_loss
+                + lambda_diversity * div_loss
+                + q_loss
+                + ent_loss
+                + lambda_arcsinh * arcsinh_loss
+            )
+            return {
+                "recon": recon,
+                "loss": total,
+                "indices": self._pad_indices(indices),
+                "recon_loss": recon_loss,
+                "arcsinh_loss": arcsinh_loss,
+                "q_loss": q_loss,
+                "phys_loss": phys_loss,
+                "diversity_loss": div_loss,
+                "entropy_loss": ent_loss,
+                "entropy_loss_hist": hist_ent_monitor,
+                "recon_phys": recon_phys[:, 0],
+                "target_phys": target_phys[:, 0],
+            }
+
+        # desifm legacy profile (v5a-style external batch entropy)
+        z_q, q_loss, ent_loss_q, indices = self.quant(z_pre, entropy_weight=0.0)
         recon = self._decode(self._pad_indices(indices), skips)
         loss_mask = align_mask_to_length(mask, recon.shape[-1])
-
         recon_phys = denormalize_spectrum_output(recon, denorm)
         target_phys = denormalize_spectrum_output(x, denorm)
         phys_loss = masked_recon_loss(recon_phys[:, 0], target_phys[:, 0], loss_mask)
         arcsinh_loss = masked_recon_loss(recon[:, 0], x[:, 0], loss_mask)
 
-        # Entropy on real latent positions only (before index padding to N_LATENT_TOKENS).
+        ent_loss = torch.zeros((), device=x.device, dtype=x.dtype)
         if use_batch_entropy and lambda_entropy > 0:
-            ent_loss = batch_codebook_entropy_loss(indices, n_bins=self.quant.n_codes)
+            ent_loss = batch_codebook_entropy_loss(indices, n_bins=self.quant.n_codes) * lambda_entropy
         elif lambda_entropy > 0:
             from desifm.training.codec_loss import latent_index_entropy_penalty
 
-            ent_loss = latent_index_entropy_penalty(indices, n_bins=self.quant.n_codes)
-        else:
-            ent_loss = torch.zeros((), device=x.device, dtype=x.dtype)
+            ent_loss = latent_index_entropy_penalty(indices, n_bins=self.quant.n_codes) * lambda_entropy
 
         recon_loss = phys_loss
         total = (
             lambda_phys * phys_loss
             + lambda_arcsinh * arcsinh_loss
             + q_loss
-            + lambda_entropy * ent_loss
+            + ent_loss
+            + ent_loss_q
         )
-
         return {
             "recon": recon,
             "loss": total,
             "indices": self._pad_indices(indices),
             "recon_loss": recon_loss,
             "arcsinh_loss": arcsinh_loss,
-            "q_loss": q_loss,
+            "q_loss": q_loss + ent_loss_q,
             "phys_loss": phys_loss,
+            "diversity_loss": torch.zeros((), device=x.device, dtype=x.dtype),
             "entropy_loss": ent_loss,
+            "entropy_loss_hist": ent_loss.detach() if isinstance(ent_loss, torch.Tensor) else ent_loss,
             "recon_phys": recon_phys[:, 0],
             "target_phys": target_phys[:, 0],
         }

@@ -98,8 +98,15 @@ def audit_code_usage(
         "lambda_phys": lambda_phys,
         "lambda_entropy": lambda_entropy,
     }
-    if hasattr(model, "forward") and "use_batch_entropy" in model.forward.__code__.co_varnames:
-        forward_kw["use_batch_entropy"] = use_batch_entropy
+    sig = getattr(model.forward, "__code__", None)
+    if sig is not None:
+        params = sig.co_varnames
+        if "loss_profile" in params:
+            forward_kw.setdefault("loss_profile", "fm")
+            forward_kw.setdefault("lambda_diversity", 1.0)
+            forward_kw.setdefault("lambda_arcsinh", 0.1)
+        if "use_batch_entropy" in params and use_batch_entropy:
+            forward_kw["use_batch_entropy"] = use_batch_entropy
     out = model(x, denorm, mask=mask, **forward_kw)
     n_codes = 256
     if hasattr(model, "quant") and hasattr(model.quant, "n_codes"):

@@ -76,8 +76,23 @@ def prepare_batch(batch: dict, input_style: str) -> tuple[torch.Tensor, torch.Te
     return prepare_codec_batch_for_style(batch, input_style)
 
 
-def model_forward_kw(codec_version: str) -> dict:
-    if codec_version in ("v5a", "v5"):
+def model_forward_kw(
+    codec_version: str,
+    *,
+    loss_profile: str = "fm",
+    diversity_loss_weight: float = 0.0,
+    lambda_arcsinh: float = 0.1,
+) -> dict:
+    if codec_version == "v5":
+        kw: dict = {
+            "loss_profile": loss_profile,
+            "lambda_diversity": diversity_loss_weight,
+            "lambda_arcsinh": lambda_arcsinh,
+        }
+        if loss_profile == "desifm":
+            kw["use_batch_entropy"] = True
+        return kw
+    if codec_version == "v5a":
         return {"use_batch_entropy": True}
     return {}
 
@@ -100,6 +115,7 @@ def run_validation(
     codec_version: str,
     lambda_phys: float,
     lambda_entropy: float,
+    fwd_extra: dict | None = None,
     max_batches: int = 32,
 ) -> dict[str, float]:
     model.eval()
@@ -110,6 +126,7 @@ def run_validation(
         "phys": 0.0,
         "q": 0.0,
         "entropy": 0.0,
+        "diversity": 0.0,
         "rms": 0.0,
         "std_ratio": 0.0,
         "std_ratio_per_spec_median": 0.0,
@@ -118,7 +135,7 @@ def run_validation(
         "code_usage_fraction_gate": 0.0,
     }
     per_spec_ratios: list[float] = []
-    fwd_extra = model_forward_kw(codec_version)
+    fwd_extra = fwd_extra or {}
     n_codes = n_codes_for_model(model)
     for batch in loader:
         if batch is None:
@@ -140,6 +157,7 @@ def run_validation(
         totals["phys"] += float(out["phys_loss"].item())
         totals["q"] += float(out["q_loss"].item())
         totals["entropy"] += float(out["entropy_loss"].item())
+        totals["diversity"] += float(out.get("diversity_loss", torch.tensor(0.0)).item())
         totals["rms"] += float(flux_rms(out["recon_phys"], out["target_phys"], mask_g).item())
         totals["std_ratio"] += float(
             flux_std_ratio(out["recon_phys"], out["target_phys"], mask_g).item()
@@ -264,8 +282,22 @@ def apply_version_defaults(args: argparse.Namespace) -> None:
             args.min_code_usage_fraction = 0.3
         if args.weight_decay == 0.0:
             args.weight_decay = 0.05
-        if args.delay_lambda_phys_until_code_usage is None:
-            args.delay_lambda_phys_until_code_usage = True
+        if args.loss_profile is None:
+            args.loss_profile = "fm"
+        if args.loss_profile == "fm":
+            if args.delay_lambda_phys_until_code_usage is None:
+                args.delay_lambda_phys_until_code_usage = False
+            if args.diversity_loss_weight is None:
+                args.diversity_loss_weight = 1.0
+            if args.lambda_arcsinh is None:
+                args.lambda_arcsinh = 0.1
+        else:
+            if args.delay_lambda_phys_until_code_usage is None:
+                args.delay_lambda_phys_until_code_usage = True
+            if args.diversity_loss_weight is None:
+                args.diversity_loss_weight = 0.0
+            if args.lambda_arcsinh is None:
+                args.lambda_arcsinh = 0.25
 
 
 def main():
@@ -324,6 +356,24 @@ def main():
         help="Hold λ_phys at 0 until val code_usage_fraction ≥ min-code-usage-fraction (v5a/v5 default: on)",
     )
     p.add_argument("--lambda-entropy", type=float, default=0.0)
+    p.add_argument(
+        "--loss-profile",
+        choices=["fm", "desifm"],
+        default=None,
+        help="v5 loss: fm (phys MSE + differentiable diversity) or desifm (delayed phys + batch entropy)",
+    )
+    p.add_argument(
+        "--diversity-loss-weight",
+        type=float,
+        default=None,
+        help="Weight on latent_bit_balance_loss for v5 fm profile (default 1.0)",
+    )
+    p.add_argument(
+        "--lambda-arcsinh",
+        type=float,
+        default=None,
+        help="Aux arcsinh recon weight (v5 fm default 0.1, desifm 0.25)",
+    )
     p.add_argument("--commitment-weight", type=float, default=None, help="LFQ beta (v4 default 0.05)")
     p.add_argument("--wandb-mode", default="online", choices=["online", "offline", "disabled"])
     p.add_argument("--log-every", type=int, default=10)
@@ -347,7 +397,9 @@ def main():
         if args.lambda_phys == 0.0:
             args.lambda_phys = 0.5
         if args.lambda_entropy == 0.0:
-            if args.codec_version == "v5":
+            if args.codec_version == "v5" and args.loss_profile == "fm":
+                pass  # histogram entropy lives inside LFQuantizerV5 (entropy_weight=0.1)
+            elif args.codec_version == "v5":
                 args.lambda_entropy = 1.5
             elif args.codec_version == "v5a":
                 args.lambda_entropy = 0.75
@@ -423,7 +475,8 @@ def main():
         log.info("manifest=%s", manifest_path or "(synthetic)")
         log.info(
             "dataset_size=%d batch_size=%d steps=%d lr=%g schedule=%s min_lr=%g warmup=%d "
-            "λ_phys=%g ramp=%d delay_phys_until_usage=%s (gate=%.2f) λ_ent=%g commit=%g",
+            "λ_phys=%g ramp=%d delay_phys_until_usage=%s (gate=%.2f) λ_ent=%g "
+            "loss_profile=%s λ_div=%g λ_arcsinh=%g commit=%g",
             len(ds),
             args.batch_size,
             args.steps,
@@ -436,6 +489,9 @@ def main():
             delay_phys,
             args.min_code_usage_fraction,
             args.lambda_entropy,
+            getattr(args, "loss_profile", "n/a"),
+            getattr(args, "diversity_loss_weight", 0.0) or 0.0,
+            getattr(args, "lambda_arcsinh", 0.0) or 0.0,
             commitment,
         )
         eff_batch = args.batch_size * world_size
@@ -464,7 +520,12 @@ def main():
         lr=args.lr,
         weight_decay=args.weight_decay,
     )
-    fwd_extra = model_forward_kw(args.codec_version)
+    fwd_extra = model_forward_kw(
+        args.codec_version,
+        loss_profile=getattr(args, "loss_profile", "fm") or "fm",
+        diversity_loss_weight=float(getattr(args, "diversity_loss_weight", 0.0) or 0.0),
+        lambda_arcsinh=float(getattr(args, "lambda_arcsinh", 0.1) or 0.1),
+    )
     wb = init_run(args.wandb_mode, args.run_name, vars(args), run_dir / "wandb", group="phase2-codec") if main_proc else None
     if main_proc and wb is not None:
         log.info("wandb run: %s", getattr(wb, "url", wb.name))
@@ -602,6 +663,7 @@ def main():
                     "phys_loss": out.get("phys_loss", torch.tensor(0.0)).item(),
                     "q_loss": out["q_loss"].item(),
                     "entropy_loss": out.get("entropy_loss", torch.tensor(0.0)).item(),
+                    "diversity_loss": out.get("diversity_loss", torch.tensor(0.0)).item(),
                     "best_metric": best_metric,
                     "skipped": skipped,
                     "steps_per_sec": sps,
@@ -615,7 +677,7 @@ def main():
                     rec["loss_median"] = med_f
                 append_metrics(metrics_path, rec)
                 log.info(
-                    "step %d/%d loss=%.4f recon=%.4f phys=%.4f q=%.4f ent=%.4f skip=%d (%.2f step/s)",
+                    "step %d/%d loss=%.4f recon=%.4f phys=%.4f q=%.4f ent=%.4f div=%.4f skip=%d (%.2f step/s)",
                     step,
                     args.steps,
                     loss_f,
@@ -623,6 +685,7 @@ def main():
                     rec["phys_loss"],
                     out["q_loss"].item(),
                     rec["entropy_loss"],
+                    rec["diversity_loss"],
                     skipped,
                     sps,
                 )
@@ -632,6 +695,7 @@ def main():
                     "train/phys": rec["phys_loss"],
                     "train/q_loss": out["q_loss"].item(),
                     "train/entropy": rec["entropy_loss"],
+                    "train/diversity_loss": rec["diversity_loss"],
                     "train/skipped": skipped,
                     "train/lr": opt.param_groups[0]["lr"],
                     "train/lambda_phys_eff": lambda_phys_eff,
@@ -670,6 +734,7 @@ def main():
                     codec_version=args.codec_version,
                     lambda_phys=val_lambda_phys,
                     lambda_entropy=args.lambda_entropy,
+                    fwd_extra=fwd_extra,
                     max_batches=args.val_max_batches,
                 )
                 if (
@@ -721,6 +786,7 @@ def main():
                         "val/code_usage_fraction_gate": val_stats.get("code_usage_fraction_gate", 0.0),
                         "val/q_loss": val_stats["q"],
                         "val/entropy_penalty": val_stats["entropy"],
+                        "val/diversity_loss": val_stats.get("diversity", 0.0),
                     },
                     step,
                 )

@@ -7,6 +7,7 @@ from desifm.training.codec_loss import (
     flux_rms,
     flux_std_ratio,
     flux_std_ratio_per_sample,
+    latent_bit_balance_loss,
     latent_index_entropy_penalty,
     physical_flux_loss,
     top_hat_smooth_flux,
@@ -36,6 +37,26 @@ def test_code_usage_stats_empty():
     stats = code_usage_stats(torch.zeros(0, dtype=torch.long), n_codes=256)
     assert stats["n_unique"] == 0
     assert stats["usage_fraction"] == 0.0
+
+
+def test_latent_bit_balance_collapsed_high():
+    z = torch.full((4, 8, 32), 5.0)
+    assert latent_bit_balance_loss(z).item() > 0.9
+
+
+def test_latent_bit_balance_spread_lower():
+    z = torch.randn(8, 10, 64)
+    collapsed = latent_bit_balance_loss(torch.full((8, 10, 64), 4.0))
+    spread = latent_bit_balance_loss(z)
+    assert spread.item() < collapsed.item()
+
+
+def test_latent_bit_balance_grad_flows():
+    z = torch.randn(4, 10, 32, requires_grad=True)
+    loss = latent_bit_balance_loss(z)
+    loss.backward()
+    assert z.grad is not None
+    assert z.grad.abs().sum().item() > 0
 
 
 def test_batch_entropy_uniform_lower_than_collapsed():

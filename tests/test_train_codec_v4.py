@@ -98,7 +98,7 @@ def test_effective_lambda_phys_no_delay():
     ) == pytest.approx(0.25, rel=1e-4)
 
 
-def test_apply_version_defaults_v5_delay_phys():
+def test_apply_version_defaults_v5_fm_profile():
     args = tc.argparse.Namespace(
         codec_version="v5",
         steps=5000,
@@ -113,9 +113,46 @@ def test_apply_version_defaults_v5_delay_phys():
         min_code_usage_fraction=0.0,
         weight_decay=0.0,
         delay_lambda_phys_until_code_usage=None,
+        loss_profile=None,
+        diversity_loss_weight=None,
+        lambda_arcsinh=None,
+    )
+    tc.apply_version_defaults(args)
+    assert args.loss_profile == "fm"
+    assert args.delay_lambda_phys_until_code_usage is False
+    assert args.diversity_loss_weight == 1.0
+    assert args.lambda_arcsinh == 0.1
+
+
+def test_apply_version_defaults_v5_desifm_profile():
+    args = tc.argparse.Namespace(
+        codec_version="v5",
+        steps=5000,
+        batch_size=16,
+        lr=3e-4,
+        checkpoint_metric="median",
+        healpix_holdout_frac=0.0,
+        val_every=0,
+        lr_schedule="constant",
+        lambda_phys_ramp_steps=0,
+        warmup_steps=0,
+        min_code_usage_fraction=0.0,
+        weight_decay=0.0,
+        delay_lambda_phys_until_code_usage=None,
+        loss_profile="desifm",
+        diversity_loss_weight=None,
+        lambda_arcsinh=None,
     )
     tc.apply_version_defaults(args)
     assert args.delay_lambda_phys_until_code_usage is True
+    assert args.diversity_loss_weight == 0.0
+
+
+def test_model_forward_kw_v5_fm():
+    kw = tc.model_forward_kw("v5", loss_profile="fm", diversity_loss_weight=1.0, lambda_arcsinh=0.1)
+    assert kw["loss_profile"] == "fm"
+    assert kw["lambda_diversity"] == 1.0
+    assert "use_batch_entropy" not in kw
 
 
 def test_lambda_ramp_scale():

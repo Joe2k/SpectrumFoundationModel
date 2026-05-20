@@ -11,11 +11,12 @@ def test_spectrum_codec_v5_forward_shapes():
     batch = {"flux": flux, "ivar": ivar, "mask": mask}
     x, denorm, m = prepare_codec_batch_for_style(batch, INPUT_STYLE_V4)
     model = SpectrumCodecV5(commitment_weight=0.05)
-    out = model(x, denorm, m, lambda_phys=1.0, lambda_entropy=0.5)
+    out = model(x, denorm, m, loss_profile="fm", lambda_phys=1.0, lambda_diversity=1.0)
     assert out["indices"].shape[0] == 2
     assert out["recon"].shape == x.shape
     assert out["recon_phys"].shape[0] == 2
     assert out["loss"].item() > 0
+    assert "diversity_loss" in out
     assert model.quant.n_codes == 1024  # 2**10 latent_dim
 
 
@@ -30,7 +31,20 @@ def test_spectrum_codec_v5_native_padded_length():
     x, denorm, m = prepare_codec_batch_for_style(batch, INPUT_STYLE_V4)
     assert x.shape[-1] == 7781
     model = SpectrumCodecV5(commitment_weight=0.05)
-    out = model(x, denorm, m, lambda_phys=0.5, lambda_entropy=0.5)
+    out = model(x, denorm, m, loss_profile="fm", lambda_phys=0.5, lambda_diversity=1.0)
     assert out["recon"].shape[-1] == GRID_SIZE
     assert out["recon_phys"].shape[-1] == GRID_SIZE
     assert out["target_phys"].shape[-1] == GRID_SIZE
+
+
+def test_spectrum_codec_v5_fm_backward():
+    flux = torch.rand(2, 8704, requires_grad=False) + 0.5
+    ivar = torch.ones(2, 8704)
+    mask = torch.zeros(2, 8704, dtype=torch.bool)
+    batch = {"flux": flux, "ivar": ivar, "mask": mask}
+    x, denorm, m = prepare_codec_batch_for_style(batch, INPUT_STYLE_V4)
+    model = SpectrumCodecV5(commitment_weight=0.05)
+    out = model(x, denorm, m, loss_profile="fm", lambda_phys=0.5, lambda_diversity=1.0)
+    out["loss"].backward()
+    grads = [p.grad for p in model.parameters() if p.requires_grad]
+    assert any(g is not None and g.abs().sum().item() > 0 for g in grads)
