@@ -9,9 +9,10 @@ def test_forward_with_loss():
     dec = torch.randint(0, 512, (2, 10))
     tgt = torch.randint(0, 512, (2, 10))
     tgt[:, 0] = REDSHIFT_OFFSET + 3
-    logits, loss = m(enc, dec, targets=tgt, approach="a")
+    logits, loss, parts = m(enc, dec, targets=tgt, approach="a")
     assert logits.shape[:2] == (2, 10)
     assert loss is not None
+    assert parts is not None and "loss_z" in parts and "loss_spec" in parts
 
 
 def test_approach_a_aux_increases_loss():
@@ -19,6 +20,6 @@ def test_approach_a_aux_increases_loss():
     enc = torch.randint(0, 512, (2, 12))
     dec = torch.randint(0, 512, (2, 8))
     tgt = torch.full((2, 8), REDSHIFT_OFFSET + 1, dtype=torch.long)
-    _, l0 = m(enc, dec, targets=tgt, aux_z_weight=0.0, approach="a")
-    _, l1 = m(enc, dec, targets=tgt, aux_z_weight=1.0, approach="a")
+    _, l0, _ = m(enc, dec, targets=tgt, aux_z_weight=0.0, approach="a")
+    _, l1, _ = m(enc, dec, targets=tgt, aux_z_weight=1.0, approach="a")
     assert l1.item() >= l0.item()

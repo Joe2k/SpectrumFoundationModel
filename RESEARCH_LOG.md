@@ -350,3 +350,12 @@ See [`docs/NERSC_INTERACTIVE.md`](docs/NERSC_INTERACTIVE.md) for full commands.
 | `smoke_aion_tokenizer.py --synthetic` | shape `(2, 273)`, codes 10–1023, **n_unique=342** (batch), resampled to 8704 |
 | `run_smoke_local.sh` (AION A+B) | OK; `smoke_approach_a_aion` best_val≈163.4, `smoke_approach_b_aion` best_val≈159.3 |
 | `test_train_model_desifm.py` | PASS (legacy desifm path after `train_codec` logging/`quant_temperature` fix) |
+
+### Phase 5 W&B (`p5_approach_b_aion`, May 2026)
+
+- **Run:** [p5_approach_b_aion](https://wandb.ai/jjayaseelan-university-of-san-francisco/desi-fm-2026/runs/2c13i7w7) — Approach B, AION tokenizer, `dr1_10k_scratch.jsonl`, 4×GPU DDP, `batch_size=8`.
+- **Throughput:** ~1.1 step/s (~8 min / 600 steps); bottleneck = frozen AION encode + transformer forward.
+- **Train @ ~step 600–760:** `train/loss` 164→~96; `train/spec_acc` ~0→~7%; `train/z_acc` ~0% (expected early for Approach B); `spec_codes_unique` 630–860.
+- **System (W&B):** `system/gpu.0–3.memory` logged — check **System** panel; if GPU mem **&lt; ~65%**, try `--batch-size 12`; if **&gt; ~85%**, drop to `6`.
+- **Tuning (4 GPU, 32 CPU typical):** `--batch-size 8`, `--num-workers 4` per rank (16 loader procs total). Do not exceed ~8 workers/rank (32 CPUs).
+- **Extra metrics (after pull):** `train/loss_z`, `train/loss_spec`, `train/perplexity_spec`, `train/grad_norm`, `val/*` counterparts, `val-max-batches 32`.

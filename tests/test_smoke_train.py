@@ -26,6 +26,6 @@ def test_one_step_approach_a():
     spec, z = tokenize_batch(batch, TinyCodec(), zc, device)
     enc, dec, tgt, _ = build_sequences(spec, z, "a")
     model = DesiFoundationModel(d_model=64, n_enc_layers=1, n_dec_layers=1, n_heads=4)
-    logits, loss = model(enc, dec, targets=tgt, approach="a")
+    logits, loss, _ = model(enc, dec, targets=tgt, approach="a")
     loss.backward()
     assert torch.isfinite(loss)

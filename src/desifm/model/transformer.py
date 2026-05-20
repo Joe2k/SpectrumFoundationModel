@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, Optional, Tuple
+from typing import Any, Literal, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -88,11 +88,11 @@ class DesiFoundationModel(nn.Module):
         z_weight: float = 20.0,
         aux_z_weight: float = 0.5,
         approach: Approach = "a",
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[dict[str, Any]]]:
         memory = self.encode(enc_ids)
         logits = self.lm_head(self.decode(dec_ids, memory))
         if targets is None:
-            return logits, None
+            return logits, None, None
 
         per_tok = F.cross_entropy(
             logits.reshape(-1, self.vocab_size),
@@ -107,12 +107,20 @@ class DesiFoundationModel(nn.Module):
         loss_seq = z_weight * loss_z + loss_spec
 
         loss = loss_seq
+        parts: dict[str, Any] = {
+            "loss_z": loss_z.detach(),
+            "loss_spec": loss_spec.detach(),
+            "loss_seq": loss_seq.detach(),
+            "loss_aux_z": torch.tensor(0.0, device=loss.device),
+        }
         if approach == "a":
             z_class = (targets[:, 0] - REDSHIFT_OFFSET).clamp(0, self.n_redshift_classes - 1)
             z_logits = self.z_head(memory.mean(dim=1))
-            loss = loss + aux_z_weight * F.cross_entropy(z_logits, z_class)
+            aux = F.cross_entropy(z_logits, z_class)
+            parts["loss_aux_z"] = aux.detach()
+            loss = loss + aux_z_weight * aux
 
-        return logits, loss
+        return logits, loss, parts
 
     @torch.no_grad()
     def generate_ar(

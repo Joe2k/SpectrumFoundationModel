@@ -57,6 +57,17 @@ def append_metrics(path: Path, record: dict) -> None:
         f.write(json.dumps(record) + "\n")
 
 
+def _loss_parts_float(parts: dict | None) -> dict[str, float]:
+    if not parts:
+        return {}
+    out = {}
+    for k, v in parts.items():
+        out[k] = float(v.item()) if torch.is_tensor(v) else float(v)
+    if "loss_spec" in out:
+        out["perplexity_spec"] = float(math.exp(min(out["loss_spec"], 20.0)))
+    return out
+
+
 def lr_schedule(step: int, base: float, warmup: int, total: int) -> float:
     if step < warmup:
         return base * (step + 1) / max(1, warmup)
@@ -116,6 +127,13 @@ def main():
     p.add_argument("--wandb-mode", default="online")
     p.add_argument("--log-every", type=int, default=10, help="Log train metrics every N steps")
     p.add_argument("--val-every", type=int, default=500, help="Run validation every N steps (0 = disable)")
+    p.add_argument(
+        "--val-max-batches",
+        type=int,
+        default=32,
+        help="Cap validation batches per eval (faster; full val if 0)",
+    )
+    p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--synthetic", action="store_true", help="Use random spectra (no FITS/manifest)")
     args = p.parse_args()
@@ -189,7 +207,7 @@ def main():
     log = setup_logging(run_dir) if main_proc else logging.getLogger("train_model")
     log.setLevel(logging.INFO)
     metrics_path = run_dir / "metrics.jsonl"
-    val_every = args.val_every if args.val_every > 0 else max(args.log_every, args.steps // 5)
+    val_every = args.val_every
 
     if main_proc:
         log.info("=== DesiFoundationModel approach %s ===", args.approach)
@@ -269,7 +287,7 @@ def main():
         enc, dec, tgt, mask_pos = build_sequences(
             spec_idx, z_idx, args.approach, encoder_mask_ratio=args.encoder_mask_ratio
         )
-        logits, loss = unwrap(model)(
+        logits, loss, loss_parts = unwrap(model)(
             enc,
             dec,
             targets=tgt,
@@ -279,8 +297,9 @@ def main():
         )
         opt.zero_grad(set_to_none=True)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(unwrap(model).parameters(), 1.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(unwrap(model).parameters(), args.grad_clip)
         opt.step()
+        lp = _loss_parts_float(loss_parts)
 
         if main_proc and step % args.log_every == 0:
             m = accuracy(logits.detach(), tgt)
@@ -292,57 +311,68 @@ def main():
                 "kind": "train",
                 "step": step,
                 "loss": loss.item(),
+                "grad_norm": float(grad_norm),
                 "lr": lr,
                 "steps_per_sec": sps,
                 "spectrum_tokenizer": args.spectrum_tokenizer,
                 "spec_codes_unique": n_unique,
                 **{f"acc/{k}": v for k, v in m.items()},
                 "acc/masked_spec": ms,
+                **lp,
             }
             append_metrics(metrics_path, rec)
             log.info(
-                "train step %d/%d loss=%.4f z_acc=%.3f spec_acc=%.3f masked_spec=%.3f codes_unique=%d lr=%.2e (%.2f step/s)",
+                "train step %d/%d loss=%.4f loss_z=%.4f loss_spec=%.4f z_acc=%.3f spec_acc=%.3f "
+                "masked_spec=%.3f grad_norm=%.3f codes_unique=%d lr=%.2e (%.2f step/s)",
                 step,
                 args.steps,
                 loss.item(),
+                lp.get("loss_z", float("nan")),
+                lp.get("loss_spec", float("nan")),
                 m["z"],
                 m["spec"],
                 ms,
+                float(grad_norm),
                 n_unique,
                 lr,
                 sps,
             )
             sys.stdout.flush()
             if wb:
-                log_metrics(
-                    wb,
-                    {
-                        "train/loss": loss.item(),
-                        "train/z_acc": m["z"],
-                        "train/spec_acc": m["spec"],
-                        "train/masked_spec_acc": ms,
-                        "train/spec_codes_unique": n_unique,
-                        "train/lr": lr,
-                        "train/steps_per_sec": sps,
-                    },
-                    step,
-                )
+                wb_payload = {
+                    "train/loss": loss.item(),
+                    "train/z_acc": m["z"],
+                    "train/spec_acc": m["spec"],
+                    "train/overall_acc": m["overall"],
+                    "train/masked_spec_acc": ms,
+                    "train/spec_codes_unique": n_unique,
+                    "train/lr": lr,
+                    "train/steps_per_sec": sps,
+                    "train/grad_norm": float(grad_norm),
+                    "train/loss_z": lp.get("loss_z", 0.0),
+                    "train/loss_spec": lp.get("loss_spec", 0.0),
+                    "train/perplexity_spec": lp.get("perplexity_spec", 0.0),
+                }
+                if "loss_aux_z" in lp:
+                    wb_payload["train/loss_aux_z"] = lp["loss_aux_z"]
+                log_metrics(wb, wb_payload, step)
 
-        if main_proc and step > 0 and step % val_every == 0:
+        if main_proc and val_every > 0 and step > 0 and step % val_every == 0:
             log.info("validation step %d ...", step)
             sys.stdout.flush()
             unwrap(model).eval()
             vloss, vn = 0.0, 0
-            vz_acc, vspec_acc = 0.0, 0.0
+            vz_acc, vspec_acc, vmasked = 0.0, 0.0, 0.0
+            vloss_z, vloss_spec = 0.0, 0.0
             with torch.no_grad():
                 for vb in val_loader:
                     if vb is None:
                         continue
                     si, zi = tokenize_batch(vb, spectrum_tok, z_codec, device)
-                    enc_v, dec_v, tgt_v, _mp = build_sequences(
+                    enc_v, dec_v, tgt_v, vmp = build_sequences(
                         si, zi, args.approach, args.encoder_mask_ratio
                     )
-                    lg, ls = unwrap(model)(
+                    lg, ls, vparts = unwrap(model)(
                         enc_v,
                         dec_v,
                         targets=tgt_v,
@@ -351,19 +381,33 @@ def main():
                         approach=args.approach,
                     )
                     vm = accuracy(lg, tgt_v)
+                    vms = masked_spec_accuracy(lg, tgt_v, vmp)
+                    vlp = _loss_parts_float(vparts)
                     vloss += ls.item()
                     vz_acc += vm["z"]
                     vspec_acc += vm["spec"]
+                    vmasked += vms if not math.isnan(vms) else 0.0
+                    vloss_z += vlp.get("loss_z", 0.0)
+                    vloss_spec += vlp.get("loss_spec", 0.0)
                     vn += 1
+                    if args.val_max_batches > 0 and vn >= args.val_max_batches:
+                        break
             vloss /= max(vn, 1)
             vz_acc /= max(vn, 1)
             vspec_acc /= max(vn, 1)
+            vmasked /= max(vn, 1)
+            vloss_z /= max(vn, 1)
+            vloss_spec /= max(vn, 1)
             val_rec = {
                 "kind": "val",
                 "step": step,
                 "loss": vloss,
+                "loss_z": vloss_z,
+                "loss_spec": vloss_spec,
+                "perplexity_spec": float(math.exp(min(vloss_spec, 20.0))),
                 "acc/z": vz_acc,
                 "acc/spec": vspec_acc,
+                "acc/masked_spec": vmasked,
                 "n_batches": vn,
                 "best_val_loss": min(best_val, vloss),
             }
@@ -382,11 +426,15 @@ def main():
                     run_dir / "best.pt",
                 )
             log.info(
-                "val step %d loss=%.4f z_acc=%.3f spec_acc=%.3f batches=%d best_val=%.4f%s",
+                "val step %d loss=%.4f loss_z=%.4f loss_spec=%.4f z_acc=%.3f spec_acc=%.3f "
+                "masked_spec=%.3f batches=%d best_val=%.4f%s",
                 step,
                 vloss,
+                vloss_z,
+                vloss_spec,
                 vz_acc,
                 vspec_acc,
+                vmasked,
                 vn,
                 best_val,
                 " -> saved best.pt" if saved else "",
@@ -397,8 +445,12 @@ def main():
                     wb,
                     {
                         "val/loss": vloss,
+                        "val/loss_z": vloss_z,
+                        "val/loss_spec": vloss_spec,
+                        "val/perplexity_spec": val_rec["perplexity_spec"],
                         "val/z_acc": vz_acc,
                         "val/spec_acc": vspec_acc,
+                        "val/masked_spec_acc": vmasked,
                     },
                     step,
                 )

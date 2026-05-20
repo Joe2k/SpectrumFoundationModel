@@ -247,7 +247,7 @@ python -m torch.distributed.run --nproc_per_node=4 scripts/train_model.py \
   --spectrum-tokenizer aion \
   --approach b --run-name p5_approach_b_aion \
   --steps 10000 --batch-size 8 --num-workers 4 \
-  --log-every 10 --val-every 500 \
+  --log-every 10 --val-every 500 --val-max-batches 32 \
   --scratch-out $NERSC_SCRATCH_ROOT/checkpoints \
   --wandb-mode online
 
@@ -257,7 +257,7 @@ python -m torch.distributed.run --nproc_per_node=4 scripts/train_model.py \
   --spectrum-tokenizer aion \
   --approach a --run-name p5_approach_a_aion \
   --steps 10000 --batch-size 8 --num-workers 4 \
-  --log-every 10 --val-every 500 \
+  --log-every 10 --val-every 500 --val-max-batches 32 \
   --scratch-out $NERSC_SCRATCH_ROOT/checkpoints \
   --wandb-mode online
 ```
