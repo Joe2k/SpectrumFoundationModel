@@ -34,7 +34,7 @@ from desifm.training.distributed import (
 from desifm.training.metrics import accuracy, masked_spec_accuracy
 from desifm.training.env import load_project_env
 from desifm.training.paths import require_scratch_manifest, scratch_root
-from desifm.training.wandb_log import finish, init_run, log_metrics
+from desifm.training.wandb_log import find_wandb_run_id, finish, init_run, log_metrics, save_wandb_run_id
 
 
 def setup_logging(run_dir: Path) -> logging.Logger:
@@ -82,8 +82,9 @@ def build_checkpoint(
     step: int,
     best_val: float,
     args: argparse.Namespace,
+    wandb_id: str | None = None,
 ) -> dict:
-    return {
+    out = {
         "model": unwrap(model).state_dict(),
         "optimizer": optimizer.state_dict(),
         "z_codec": z_codec.state_dict(),
@@ -97,7 +98,11 @@ def build_checkpoint(
         "z_weight": args.z_weight,
         "aux_z_weight": args.aux_z_weight,
         "encoder_mask_ratio": args.encoder_mask_ratio,
+        "run_name": args.run_name,
     }
+    if wandb_id:
+        out["wandb_id"] = wandb_id
+    return out
 
 
 def save_checkpoint(path: Path, payload: dict, log: logging.Logger | None = None) -> None:
@@ -133,8 +138,8 @@ def load_resume_checkpoint(
     z_codec: RedshiftCodec,
     args: argparse.Namespace,
     device: torch.device,
-) -> tuple[int, float, bool]:
-    """Load checkpoint; return (start_step, best_val, full_resume)."""
+) -> tuple[int, float, bool, str | None]:
+    """Load checkpoint; return (start_step, best_val, full_resume, wandb_id)."""
     ckpt = torch.load(path, map_location=device, weights_only=False)
     _validate_checkpoint_meta(ckpt, args)
     unwrap(model).load_state_dict(ckpt["model"])
@@ -144,7 +149,8 @@ def load_resume_checkpoint(
         optimizer.load_state_dict(ckpt["optimizer"])
     start = int(ckpt.get("step", -1)) + 1
     best_val = float(ckpt.get("best_val", float("inf")))
-    return start, best_val, full
+    wandb_id = ckpt.get("wandb_id")
+    return start, best_val, full, str(wandb_id) if wandb_id else None
 
 
 def collect_z(records: list[dict], max_files: int = 100) -> torch.Tensor:
@@ -321,9 +327,10 @@ def main():
     step, best_val = 0, float("inf")
     resume_ckpt: Path | None = None if args.no_resume else find_resume_checkpoint(run_dir)
 
+    ckpt_wandb_id: str | None = None
     if resume_ckpt is not None:
         if main_proc:
-            start_step, best_val, full = load_resume_checkpoint(
+            start_step, best_val, full, ckpt_wandb_id = load_resume_checkpoint(
                 resume_ckpt, model, opt, z_codec, args, device
             )
             step = start_step
@@ -343,9 +350,10 @@ def main():
             import torch.distributed as dist
 
             if not main_proc:
-                step, best_val, _ = load_resume_checkpoint(
+                start_step, best_val, _, ckpt_wandb_id = load_resume_checkpoint(
                     resume_ckpt, model, opt, z_codec, args, device
                 )
+                step = start_step
             meta = torch.tensor([step, best_val], device=device, dtype=torch.float64)
             dist.broadcast(meta, src=0)
             step = int(meta[0].item())
@@ -372,10 +380,9 @@ def main():
         cleanup_distributed()
         return
 
-    wandb_id_path = run_dir / "wandb_id.txt"
-    wandb_resume_id = (
-        wandb_id_path.read_text().strip() if resume_ckpt is not None and wandb_id_path.is_file() else None
-    )
+    wandb_resume_id = None
+    if resume_ckpt is not None:
+        wandb_resume_id = find_wandb_run_id(run_dir, resume_ckpt) or ckpt_wandb_id
 
     wb = None
     if main_proc:
@@ -391,9 +398,12 @@ def main():
                 f"tokenizer-{args.spectrum_tokenizer}",
             ],
             resume_id=wandb_resume_id,
+            resume_step=step if resume_ckpt is not None else None,
         )
-        if wb is not None and hasattr(wb, "id") and wb.id and not wandb_id_path.is_file():
-            wandb_id_path.write_text(str(wb.id))
+        if wb is not None and getattr(wb, "id", None):
+            save_wandb_run_id(run_dir, str(wb.id))
+            if resume_ckpt is not None:
+                log_metrics(wb, {"resume/from_step": step}, step=step)
     train_it = iter(train_loader)
     warmup = min(200, max(1, args.steps // 5))
     t0 = time.perf_counter()
@@ -544,7 +554,8 @@ def main():
                 saved = vloss < best_val
                 if saved:
                     best_val = vloss
-                ckpt = build_checkpoint(model, opt, z_codec, step, best_val, args)
+                wb_id = str(wb.id) if wb is not None and getattr(wb, "id", None) else None
+                ckpt = build_checkpoint(model, opt, z_codec, step, best_val, args, wandb_id=wb_id)
                 save_checkpoint(run_dir / "last.pt", ckpt, log)
                 if saved:
                     save_checkpoint(run_dir / "best.pt", ckpt, log)
@@ -583,9 +594,10 @@ def main():
     finally:
         if main_proc and step > 0:
             try:
+                wb_id = str(wb.id) if wb is not None and getattr(wb, "id", None) else None
                 save_checkpoint(
                     run_dir / "last.pt",
-                    build_checkpoint(model, opt, z_codec, step - 1, best_val, args),
+                    build_checkpoint(model, opt, z_codec, step - 1, best_val, args, wandb_id=wb_id),
                     log,
                 )
             except Exception:

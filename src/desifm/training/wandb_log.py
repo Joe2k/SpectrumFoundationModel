@@ -31,6 +31,57 @@ def _configure_wandb_dirs(log_dir: Path) -> None:
     os.environ.setdefault("WANDB_INIT_TIMEOUT", "120")
 
 
+def find_wandb_run_id(run_dir: Path, checkpoint_path: Path | None = None) -> str | None:
+    """Resolve W&B run id for resume: wandb_id.txt, checkpoint, then local wandb/ dir."""
+    id_file = run_dir / "wandb_id.txt"
+    if id_file.is_file():
+        rid = id_file.read_text().strip()
+        if rid:
+            return rid
+
+    if checkpoint_path is not None and checkpoint_path.is_file():
+        try:
+            import torch
+
+            ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+            wid = ckpt.get("wandb_id")
+            if wid:
+                return str(wid)
+        except Exception:
+            pass
+
+    wandb_dir = run_dir / "wandb"
+    if not wandb_dir.is_dir():
+        return None
+
+    latest = wandb_dir / "latest-run"
+    if latest.exists():
+        target = latest.resolve() if latest.is_symlink() else latest
+        rid = _run_id_from_wandb_dirname(target.name)
+        if rid:
+            return rid
+
+    runs = sorted(wandb_dir.glob("run-*"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for run_path in runs:
+        rid = _run_id_from_wandb_dirname(run_path.name)
+        if rid:
+            return rid
+    return None
+
+
+def _run_id_from_wandb_dirname(dirname: str) -> str | None:
+    # e.g. run-20250519_220935-2c13i7w7 -> 2c13i7w7
+    if not dirname.startswith("run-"):
+        return None
+    rid = dirname.rsplit("-", 1)[-1]
+    return rid if len(rid) >= 8 else None
+
+
+def save_wandb_run_id(run_dir: Path, run_id: str) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "wandb_id.txt").write_text(run_id.strip())
+
+
 def _wandb_init(
     mode: str,
     name: str,
@@ -56,7 +107,7 @@ def _wandb_init(
     }
     if resume_id:
         kwargs["id"] = resume_id
-        kwargs["resume"] = "allow"
+        kwargs["resume"] = "must"
     return wandb.init(**kwargs)
 
 
@@ -68,6 +119,7 @@ def init_run(
     group: str | None = None,
     tags: list[str] | None = None,
     resume_id: str | None = None,
+    resume_step: int | None = None,
 ):
     if mode == "disabled":
         return None
@@ -94,12 +146,43 @@ def init_run(
     log_dir = Path(dir)
     _configure_wandb_dirs(log_dir)
 
+    run_dir = log_dir.parent
+
+    def _do_init(rid: str | None, resume_mode: str | None) -> Any:
+        import wandb
+
+        kwargs: dict[str, Any] = {
+            "project": WANDB_PROJECT,
+            "name": name,
+            "config": config,
+            "dir": str(log_dir),
+            "group": group,
+            "tags": tags or ["final-2026"],
+            "mode": mode,
+        }
+        if rid:
+            kwargs["id"] = rid
+            kwargs["resume"] = resume_mode or "must"
+        return wandb.init(**kwargs)
+
     try:
-        run = _wandb_init(mode, name, config, log_dir, group, tags, resume_id=resume_id)
+        try:
+            run = _do_init(resume_id, "must" if resume_id else None)
+        except Exception as exc:
+            if not resume_id:
+                raise
+            print(f"[wandb] resume=must failed ({exc}); retrying with resume=allow", flush=True)
+            run = _do_init(resume_id, "allow")
         if resume_id:
-            print(f"[wandb] resumed id={resume_id} mode={mode} dir={log_dir}", flush=True)
+            save_wandb_run_id(run_dir, resume_id)
+            msg = f"[wandb] resumed id={resume_id} mode={mode} dir={log_dir}"
+            if resume_step is not None:
+                msg += f" from_step={resume_step}"
+            print(msg, flush=True)
         else:
             print(f"[wandb] started mode={mode} dir={log_dir}", flush=True)
+        if run is not None and getattr(run, "id", None):
+            save_wandb_run_id(run_dir, str(run.id))
         return run
     except Exception as exc:
         if mode == "offline":
@@ -114,6 +197,8 @@ def init_run(
         try:
             run = _wandb_init("offline", name, config, log_dir, group, tags, resume_id=resume_id)
             print(f"[wandb] offline run dir={log_dir} (requested {requested})", flush=True)
+            if run is not None and getattr(run, "id", None):
+                save_wandb_run_id(log_dir.parent, str(run.id))
             return run
         except Exception as exc2:
             print(f"[wandb] offline init also failed ({exc2}); continuing without W&B", flush=True)

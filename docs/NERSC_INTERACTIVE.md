@@ -265,7 +265,7 @@ python -m torch.distributed.run --nproc_per_node=4 scripts/train_model.py \
 **Logs per run:** `$NERSC_SCRATCH_ROOT/checkpoints/<run-name>/train.log` and `metrics.jsonl`  
 (`kind`: `train` every `--log-every` steps, `val` every `--val-every` steps).
 
-**Resume:** Re-run the **same** `--run-name`; training auto-continues from `last.pt` (or `best.pt` if no `last.pt`). Checkpoints include model, optimizer, `z_codec`, and step. Use `--no-resume` to start over. W&B run id is stored in `wandb_id.txt` when online.
+**Resume:** Re-run the **same** `--run-name`; training auto-continues from `last.pt` (or `best.pt`). Checkpoints include model, optimizer, `z_codec`, step, and `wandb_id`. W&B resumes the **same run** (metrics append at the correct step) via `wandb_id.txt`, checkpoint, or `wandb/run-*` dir. Use `--no-resume` to start a fresh W&B run.
 
 ```bash
 tail -f $NERSC_SCRATCH_ROOT/checkpoints/p5_approach_b_aion/train.log
